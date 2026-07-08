@@ -141,14 +141,22 @@ Log format per entry: **What I needed → Where verified → What I found → Da
   - **Block explorer:** OKLink, `https://www.oklink.com/xlayer`.
   - **Architecture:** X Layer is an OP-Stack-based optimistic rollup (per an August 2025 upgrade), rated up to 20,000 TPS with negligible gas fees.
 - **Cheapest honest anchoring method:** not yet finalized — a plain calldata-only transaction (hash committed in the `data` field of a zero-value tx to a known address, e.g. the sender's own address) is the simplest pattern and needs no custom contract; a minimal attestation contract (single `emit` event per commit) is the alternative if queryability-by-hash is required. Decision deferred to Phase 6 with a real testnet-then-mainnet dry run — flagged as open, not assumed.
+- **Phase 6 RPC verification, 2026-07-08:** live JSON-RPC calls to both `https://xlayerrpc.okx.com` and `https://196.rpc.thirdweb.com` with `eth_chainId` returned `0xc4` (decimal 196). This confirms both RPC paths point to X Layer mainnet. No transaction was sent because this workspace has no funded signer / OKX Agentic Wallet approval available.
 
 ---
 
 ## 9. OKX AI Genesis Hackathon — submission logistics
 
-- **Verified:** WebSearch, 2026-07-08 (multiple secondary sources referencing the hackathon rules; primary rules page not yet directly fetched — **flagging this explicitly as needing a direct re-verification against the primary rules page before Phase 9 submission**, since a cached/secondary-source date is exactly the kind of "trust a cached date" mistake the spec warns against).
-- **Found (secondary-sourced, to be reconfirmed at Phase 9):** submission window reported as **2026-07-03 00:00 UTC to 2026-07-17 23:59 UTC**, via a Google Form. ASP must pass OKX AI review and go live to be eligible (see §5).
-- **Gap flagged to Operator:** I have not yet located and fetched the actual primary rules/submission page (only secondary summaries). This must be re-verified directly before Phase 9 — do not treat 2026-07-17 as final until confirmed against the primary source.
+- **Verified:** primary OKX page + official Google Form, 2026-07-08.
+  - `GET https://web3.okx.com/xlayer/build-x-series`
+  - `GET https://forms.gle/mddEUagmDbyV37ws8` → resolved to `https://docs.google.com/forms/d/e/1FAIpQLSfIAgP_WmMGtZ5qyW_LnKZonsjyfOYwV3bduRwiuN4oBmcqjQ/viewform?usp=send_form`
+- **Found:** the primary OKX Build X page lists **OKX.AI Genesis** as an online Build X Series event running **Jul 2, 12:00 - Jul 17, 23:59 UTC**. The page's FAQ says submissions are open from **July 3, 2026, 00:00 UTC to July 17, 2026, 23:59 UTC**. Requirements found on the primary page:
+  1. Build an ASP that solves a clear real-world use case.
+  2. Submit the ASP for listing through OKX.AI; it **must pass OKX AI's internal review and go live** to remain eligible. If listing is not approved or cannot go live, the hackathon submission is invalid.
+  3. Post on X using `#OKXAI`; introduce the ASP, explain the use case, and include a clear demo/walkthrough. Demo content should be no longer than 90 seconds.
+  4. Submit the Google Form before **July 17, 2026, 23:59 UTC**, including ASP details and a link to the X participation post.
+- **Google Form fields verified from embedded form data:** form title is **"OKX.AI Genesis Hackathon"**. Fields include **ASP Name**, **Agent ID** ("The ID you received after the ASP was listed on OKX.AI."), **ASP Description**, and X participation/demo-post guidance.
+- **Correction vs earlier status:** this is no longer secondary-sourced. Primary OKX page and official form are now verified.
 
 ---
 
@@ -186,6 +194,8 @@ Log format per entry: **What I needed → Where verified → What I found → Da
 - **Verified:** WebSearch across multiple independent secondary sources (predictionhunt.com, marketmath.io, botforkalshi.com — all describing the same formula independently), 2026-07-08. **Primary source attempt:** `help.kalshi.com/trading/fees` (fetched live — confirms fees exist and points to a fee-schedule PDF, but doesn't itself state the formula) and `kalshi.com/docs/kalshi-fee-schedule.pdf` (fetch attempt returned an HTTP 429 / Vercel bot-checkpoint HTML page, not the document — **this gap is disclosed, not papered over**).
 - **Found:** taker fee = `ceil_to_cent(fee_multiplier * 0.07 * contracts * price * (1-price))`; maker fee uses `0.0175` instead of `0.07`. **Cross-validated against Kalshi's own live API**, independent of the secondary sources: real market objects returned by `GET /trade-api/v2/series/{ticker}` carry `"fee_type": "quadratic"` and a `"fee_multiplier"` field — `price * (1-price)` is exactly quadratic in price, and `fee_multiplier` is exactly the `M` term the secondary sources describe. The live API field and the independently-sourced formula corroborate each other.
 - **Used as:** `KALSHI_TAKER_FEE_RATE = 0.07` in `src/rwoo/edge.py`, applied as `0.07 * P * (1-P)` per $1-notional contract, added to half the live quoted spread for the total friction estimate. Polymarket's fee schedule has **not** been verified at all — Stage 3 uses spread only for Polymarket markets and states that gap explicitly in the friction method string returned to the caller, rather than guessing a fee.
+- **Pre-Phase-6 recheck, 2026-07-08:** official Kalshi Help Center article `https://help.kalshi.com/trading/fees` was fetched and its embedded article JSON parsed. It states that Kalshi charges a transaction fee on expected earnings and that the complete Fee Schedule and math are linked at `https://kalshi.com/docs/kalshi-fee-schedule.pdf`. The PDF still returns a Vercel Security Checkpoint / HTTP 429 to this environment, even with a browser User-Agent. Official API fields (`fee_type: "quadratic"`, `fee_multiplier: 1`) remain live and verified at `GET /trade-api/v2/series/KXHIGHNY`.
+- **Remaining gap:** the exact `0.07` formula still has not been read from Kalshi's primary PDF because the PDF is blocked. This is now narrowed to "primary PDF inaccessible," not "no official source found."
 
 ---
 
@@ -217,5 +227,16 @@ Log format per entry: **What I needed → Where verified → What I found → Da
 
 ---
 
-### Ledger status as of 2026-07-08 (Phase 5)
-All GATE 0–5-required facts are verified with real evidence above. Open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the primary hackathon rules page (§9), the primary Kalshi fee-schedule PDF (§13), the economics consensus-forecast distribution (§12), production-grade sports model inputs (§14), broader domain calibration (§15), and Phase 6 append-only/hash anchoring (§15).
+## 16. Receipt ledger and anchoring status
+
+- **Needed:** tamper-evident receipts and real X Layer mainnet anchoring.
+- **Verified locally:** `python3 verify.py --phase 6`, 2026-07-08.
+- **Found:** the local receipt system commits a real verdict payload containing venue, market ID, resolution rule, `oracle_prob`, implied probability, qualified edge, confidence, source values, and timestamp. It writes records to an append-only JSONL ledger with sequence numbers, previous hash, record hash, and head hash. A tamper test altered a recorded probability and verification detected `record_hash mismatch at record 1`.
+- **Hash algorithm disclosure:** the local ledger uses Python `hashlib.sha3_256` and labels it `sha3_256_local_commitment`. This is **not** misrepresented as Ethereum keccak256. True X Layer/EVM anchoring still requires a vetted keccak/signing path.
+- **X Layer mainnet anchoring:** not completed. Gate 6 failed honestly because no funded X Layer signer / approved OKX Agentic Wallet action is available in this workspace, and no vetted EVM signing dependency is installed. The harness reports the missing prerequisite rather than faking a transaction.
+- **Completion prerequisite:** provide an approved OKX Agentic Wallet flow or a funded X Layer account plus a vetted signing implementation. Then rerun `python3 verify.py --phase 6` and require a real transaction/explorer link before marking Gate 6 complete.
+
+---
+
+### Ledger status as of 2026-07-08 (Phase 6 local integrity built, mainnet anchor blocked)
+All GATE 0–5-required facts are verified with real evidence above. The primary OKX hackathon rules/form gap is closed (§9). Phase 6 local receipt/tamper evidence is implemented and verified (§16), but full Gate 6 remains **blocked** on a real X Layer signer/mainnet anchor. Other open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the primary Kalshi fee-schedule PDF blocked by Vercel (§13), the economics consensus-forecast distribution (§12), production-grade sports model inputs (§14), and broader domain calibration (§15).

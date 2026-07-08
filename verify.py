@@ -1068,6 +1068,192 @@ def phase_5():
     return 0 if all_pass else 1
 
 
+def phase_6():
+    from pathlib import Path
+    import shutil
+
+    from rwoo import edge as edge_mod
+    from rwoo import receipts, xlayer
+    from rwoo.backtests import weather as weather_backtest
+    from rwoo.engines import weather
+    from rwoo.readers import kalshi
+    from rwoo.weather_stations import station_for_series
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 6")
+    print("GATE 6: Receipts + tamper evidence + X Layer anchoring")
+    print(RULE)
+    print()
+    print("Discipline restatement for this phase:")
+    print("  I am building the integrity layer. A receipt must commit exactly what")
+    print("  Real-World Odds Oracle said, when, and from which source data. Tampering")
+    print("  must be detected. Deterministic-Core still applies: hashes and receipts")
+    print("  are deterministic code over real data. No LLM may create or alter a")
+    print("  probability, receipt, or commitment. Doctrine: never assume, verify.\n")
+
+    failures = []
+
+    hdr("X LAYER RPC VERIFICATION")
+    try:
+        rpc_results = xlayer.verify_rpc_endpoints()
+        show_json("X Layer RPC chainId checks", rpc_results, max_chars=1800)
+        rpc_ok = all(r["ok"] for r in rpc_results)
+        print(f"  [{'PASS' if rpc_ok else 'FAIL'}] both RPC endpoints returned chain ID 196 (0xc4)")
+        if not rpc_ok:
+            failures.append("xlayer rpc")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: X Layer RPC verification raised an error: {exc}")
+        rpc_results = []
+        rpc_ok = False
+        failures.append("xlayer rpc")
+
+    hdr("BUILDING A REAL VERDICT RECEIPT")
+    try:
+        event_ticker = "KXHIGHNY-26JUL09"
+        station = station_for_series("KXHIGHNY")
+        target_date = kalshi.parse_event_date(event_ticker)
+        market = next(m for m in kalshi.fetch_markets_for_event(event_ticker) if m.market_id.endswith("B87.5"))
+        raw = market.raw["market"]
+        engine_result = weather.compute_weather_probability(
+            lat=station.lat,
+            lon=station.lon,
+            target_date=target_date,
+            timezone_name="America/New_York",
+            strike_type=raw["strike_type"],
+            floor_strike=raw.get("floor_strike"),
+            cap_strike=raw.get("cap_strike"),
+            include_base_rate=False,
+        )
+        edge_result = edge_mod.compute_edge(market, engine_result)
+        payload = receipts.make_receipt_payload(
+            venue=market.venue,
+            market_id=market.market_id,
+            resolution_rule=market.resolution_rule,
+            oracle_prob=engine_result["oracle_prob"],
+            implied_prob=market.implied_prob,
+            edge=edge_result,
+            confidence=engine_result["confidence"],
+            sources={
+                "station": station.name,
+                "target_date": target_date,
+                "per_source_values": engine_result["per_source_values"],
+                "method": engine_result["method"],
+            },
+        )
+        show_json("Receipt payload committed", payload, max_chars=2600)
+        receipt_payload_ok = 0.0 <= payload["oracle_prob"] <= 1.0
+        print(f"  [{'PASS' if receipt_payload_ok else 'FAIL'}] receipt payload contains real market + computed probability")
+        if not receipt_payload_ok:
+            failures.append("receipt payload")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: receipt payload build raised an error: {exc}")
+        payload = {}
+        receipt_payload_ok = False
+        failures.append("receipt payload")
+
+    hdr("APPEND-ONLY LEDGER + HASH CHAIN")
+    ledger_path = Path("/tmp/rwoo_phase6_receipts.jsonl")
+    if ledger_path.exists():
+        ledger_path.unlink()
+    try:
+        ledger = receipts.AppendOnlyLedger(ledger_path)
+        verdict_record = ledger.append("verdict", payload)
+        calibration_records, _ = weather_backtest.build_weather_backtest(max_records=3)
+        calibration_payload = {
+            "domain": "weather",
+            "record_count": len(calibration_records),
+            "records": [r.__dict__ for r in calibration_records],
+        }
+        calibration_record = ledger.append("calibration_batch", calibration_payload)
+        verify_result = ledger.verify()
+        show_json("Ledger records written", [verdict_record.__dict__, calibration_record.__dict__], max_chars=3500)
+        show_json("Ledger verification result", verify_result, max_chars=1200)
+        ledger_ok = bool(verify_result.get("valid")) and verify_result.get("record_count") == 2
+        print(f"  [{'PASS' if ledger_ok else 'FAIL'}] append-only local ledger verifies with two chained records")
+        if not ledger_ok:
+            failures.append("ledger verify")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: ledger write/verify raised an error: {exc}")
+        verify_result = {}
+        ledger_ok = False
+        failures.append("ledger verify")
+
+    hdr("TAMPER TEST")
+    try:
+        tampered_path = Path("/tmp/rwoo_phase6_receipts_tampered.jsonl")
+        shutil.copyfile(ledger_path, tampered_path)
+        lines = tampered_path.read_text(encoding="utf-8").splitlines()
+        first = json.loads(lines[0])
+        first["payload"]["oracle_prob"] = 0.9999 if first["payload"].get("oracle_prob") != 0.9999 else 0.0001
+        lines[0] = receipts.canonical_json(first)
+        tampered_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tampered_result = receipts.AppendOnlyLedger(tampered_path).verify()
+        show_json("Tampered ledger verification result", tampered_result, max_chars=1200)
+        tamper_ok = tampered_result.get("valid") is False and "record_hash mismatch" in tampered_result.get("reason", "")
+        print(f"  [{'PASS' if tamper_ok else 'FAIL'}] changing a recorded probability breaks verification")
+        if not tamper_ok:
+            failures.append("tamper test")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: tamper test raised an error: {exc}")
+        tamper_ok = False
+        failures.append("tamper test")
+
+    hdr("X LAYER MAINNET ANCHOR ATTEMPT")
+    head_hash = verify_result.get("head_hash") if verify_result else None
+    if head_hash:
+        anchor_result = xlayer.anchor_commitment(head_hash)
+    else:
+        anchor_result = {"anchored": False, "reason": "no ledger head hash available"}
+    show_json("Anchor result", anchor_result, max_chars=1800)
+    anchor_ok = bool(anchor_result.get("anchored"))
+    if anchor_ok:
+        print("  [PASS] real X Layer mainnet anchor produced")
+    else:
+        print("  [FAIL] no real X Layer mainnet anchor produced")
+        print("  Honest blocker: a funded X Layer signer / approved OKX Agentic Wallet action is required.")
+
+    hdr("CORE-LAW CHECK — AST import scan across receipt/anchoring paths")
+    import ast
+    import inspect
+    all_imports = set()
+    for mod in (receipts, xlayer):
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                all_imports.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                all_imports.add(node.module)
+    llm_packages = {"openai", "anthropic", "cohere", "transformers", "langchain"}
+    matched = all_imports & llm_packages
+    print(f"Modules imported across receipts.py + xlayer.py: {sorted(all_imports)}")
+    print(f"LLM-SDK imports found: {matched or 'none'}")
+    core_law_ok = len(matched) == 0
+    print(f"  [{'PASS' if core_law_ok else 'FAIL'}] no LLM SDK anywhere in receipt/anchoring paths")
+
+    hdr("GATE 6 — ACCEPTANCE CRITERIA")
+    checks = {
+        "X Layer RPC endpoints verified as chain ID 196": rpc_ok,
+        "Real verdict committed as a receipt payload": receipt_payload_ok,
+        "Append-only hash-chained ledger verifies": ledger_ok,
+        "Tamper test detects altered verdict probability": tamper_ok,
+        "Real X Layer mainnet anchor produced": anchor_ok,
+        "No LLM SDK anywhere in receipt/anchoring paths": core_law_ok,
+        "No local integrity failures": len(failures) == 0,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 6 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -1085,6 +1271,8 @@ def main():
         sys.exit(phase_4())
     elif args.phase == 5:
         sys.exit(phase_5())
+    elif args.phase == 6:
+        sys.exit(phase_6())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)

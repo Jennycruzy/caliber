@@ -18,12 +18,45 @@ system. Improving models before receipts would add model work while the
 
 Recommended order:
 
-1. Phase 6: receipts, append-only ledger, tamper evidence, X Layer anchoring.
-2. Upgrade economics: verified consensus forecast source, no-lookahead backtest,
+1. Before Phase 6, clean up quick primary-source verification gaps where
+   feasible: Kalshi fee schedule and primary hackathon rules/form.
+2. Phase 6: receipts, append-only ledger, tamper evidence, X Layer anchoring.
+3. Alongside Phase 6, verify X Layer RPC/path/cost facts needed for anchoring.
+4. Upgrade economics: verified consensus forecast source, no-lookahead backtest,
    calibration curve, Brier score.
-3. Upgrade sports: simulator or multiple independent rating sources,
+5. Upgrade sports: simulator or multiple independent rating sources,
    no-lookahead backtest, calibration curve, Brier score.
-4. Continue Phase 7+: OKX listing/payment, daily proof loop, public pages.
+6. Continue Phase 7+: OKX listing/payment, daily proof loop, public pages.
+
+## Immediate Checklist
+
+Do before starting Phase 6:
+
+- [x] Try to verify Kalshi's primary fee schedule directly.
+- [x] Try to verify the primary OKX AI Genesis hackathon rules, deadline, and
+      Google submission form.
+- [x] Update `docs/VERIFICATION_LEDGER.md` with either successful primary
+      evidence or a precise blocked/not-found finding.
+
+Do in Phase 6:
+
+- [x] Add append-only local calibration/receipt ledger.
+- [x] Add receipt hash generation for verdict/calibration records.
+- [x] Add hash-chain or equivalent tamper detection.
+- [x] Add a tamper test to the verification harness.
+- [x] Verify X Layer RPC path.
+- [ ] Verify X Layer anchoring cost/token facts beyond RPC chain ID.
+- [ ] If wallet/gas prerequisites are available, anchor a real commitment on
+      X Layer mainnet and print the transaction/explorer evidence.
+- [x] If wallet/gas prerequisites are not available, make the gate fail or mark
+      the exact operator prerequisite honestly; do not fake an anchor.
+
+Current Phase 6 blocker:
+
+- `python3 verify.py --phase 6` passes local integrity checks but fails the
+  full gate because no funded X Layer signer / approved OKX Agentic Wallet
+  action is available. Do not mark Gate 6 complete until a real X Layer
+  mainnet transaction/explorer link is produced.
 
 ## Gaps From Completed Phases Not Fully Covered By The Immediate Next Phase
 
