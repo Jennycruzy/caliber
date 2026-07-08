@@ -33,7 +33,7 @@ disconnected from the call path.
 
 This build is phased, with a human-readable verification gate at the end of
 each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **Phase 1 complete** (Phase 0 foundations + Phase 1 market readers).
+project depends on, and how it was verified). Currently: **Phase 2 complete** (foundations, market readers, and the weather engine).
 
 ## Reproduce every claim
 
@@ -44,6 +44,7 @@ yourself:
 pip install -r requirements.txt
 python3 verify.py --phase 0   # foundations: live Open-Meteo, Kalshi, Polymarket calls
 python3 verify.py --phase 1   # market readers: canonical objects from live markets
+python3 verify.py --phase 2   # weather engine: multi-model consensus + confidence
 ```
 
 Both make live network calls and print the real responses plus a
@@ -59,6 +60,10 @@ or a canned pass.
   - `models.py` — the canonical market object.
   - `domain.py` — deterministic weather/economics/sports/other routing.
   - `readers/kalshi.py`, `readers/polymarket.py` — Stage 1 market readers.
-  - (probability engines, edge/restraint logic, calibration record, receipts — later phases)
+  - `weather_stations.py` — verified station registry (Kalshi series -> lat/lon).
+  - `engines/weather.py` — Stage 2 weather engine: multi-model ensemble
+    consensus + confidence, plus a NASA POWER historical base rate. No LLM
+    anywhere in this path — verified by an AST import check in the harness.
+  - (edge/restraint logic, calibration record, receipts, econ/sports engines — later phases)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

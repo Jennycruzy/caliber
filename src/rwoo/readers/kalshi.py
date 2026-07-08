@@ -12,6 +12,24 @@ from rwoo.models import CanonicalMarket
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
+_MONTH_ABBR = {
+    "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04", "MAY": "05", "JUN": "06",
+    "JUL": "07", "AUG": "08", "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12",
+}
+
+
+def parse_event_date(event_ticker: str) -> str:
+    """Kalshi daily-event tickers encode the target calendar date in their
+    suffix, e.g. 'KXHIGHNY-26JUL09' -> 2026-07-09. This is the unambiguous
+    source for "which local calendar day does this market measure" — the
+    event's `strike_date` field is a UTC settlement-cutoff timestamp that
+    often falls in the early hours of the *next* day, so parsing it directly
+    as the target date would be off by one for late-closing series."""
+    suffix = event_ticker.rsplit("-", 1)[-1]
+    year, month_abbr, day = suffix[:2], suffix[2:5], suffix[5:7]
+    month = _MONTH_ABBR[month_abbr.upper()]
+    return f"20{year}-{month}-{day}"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

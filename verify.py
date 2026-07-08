@@ -338,6 +338,131 @@ def phase_1():
     return 0 if all_pass else 1
 
 
+def phase_2():
+    from rwoo.engines import weather
+    from rwoo.readers import kalshi
+    from rwoo.weather_stations import station_for_series
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 2")
+    print("GATE 2: Weather engine (Stage 2) — multi-model consensus + confidence")
+    print(RULE)
+    print()
+    print("What this checks: for a real live weather market's EXACT resolution rule,")
+    print("does the engine pull independent live model forecasts, turn their")
+    print("agreement/disagreement into a probability and a confidence score with the")
+    print("formula shown, and cross-check against real historical climatology —")
+    print("all without an LLM anywhere in the number path?")
+
+    event_ticker = "KXHIGHNY-26JUL09"
+    series_ticker = "KXHIGHNY"
+    station = station_for_series(series_ticker)
+
+    hdr(f"Reading the real live market: event {event_ticker}")
+    markets = kalshi.fetch_markets_for_event(event_ticker)
+    # Pick a spread of strike types so the report shows "greater"/"less"/"between" all resolve correctly.
+    by_type: dict[str, object] = {}
+    for m in markets:
+        st = m.raw["market"]["strike_type"]
+        by_type.setdefault(st, m)
+    print(f"Station: {station.name} ({station.lat}, {station.lon})")
+    print(f"Source: {station.source}")
+    print(f"Found {len(markets)} real open markets for this event; testing one of each strike type present: {list(by_type.keys())}")
+
+    target_date = kalshi.parse_event_date(event_ticker)
+    print(f"Target calendar date parsed from event ticker suffix: {target_date}")
+
+    all_checks = []
+    for strike_type, m in by_type.items():
+        raw = m.raw["market"]
+        hdr(f"Market: {m.question}  [{strike_type}]")
+        print(f"Verbatim resolution rule: \"{m.resolution_rule}\"")
+        print(f"Kalshi's own implied probability (bid/ask midpoint): {m.implied_prob:.4f}")
+        print(f"Strike fields (structured, not text-parsed): floor_strike={raw.get('floor_strike')}, "
+              f"cap_strike={raw.get('cap_strike')}, strike_type={strike_type}")
+        print()
+
+        result = weather.compute_weather_probability(
+            lat=station.lat, lon=station.lon, target_date=target_date,
+            timezone_name="America/New_York",
+            strike_type=strike_type, floor_strike=raw.get("floor_strike"), cap_strike=raw.get("cap_strike"),
+        )
+
+        if result["refused"]:
+            print(f"REFUSED: {result['reason']}")
+            all_checks.append(False)
+            continue
+
+        print("Per-model live forecasts (Open-Meteo, °F):")
+        for model, val in result["per_source_values"].items():
+            vote = "YES" if result["per_model_vote"][model] else "NO"
+            print(f"  {model:20s} -> {val:.1f}°F  ->  resolves {vote} for this market")
+        print()
+        print(f"Ensemble mean: {result['ensemble_mean_f']:.2f}°F   Ensemble std (disagreement): {result['ensemble_std_f']:.2f}°F"
+              f"{' (floored to ' + str(weather.MIN_STD_F) + ')' if result['std_floored'] else ''}")
+        print(f"Consensus probability = normal_cdf((threshold - mean) / std), i.e. how many ensemble")
+        print(f"standard deviations the threshold sits from the ensemble mean:")
+        print(f"  -> oracle_prob = {result['oracle_prob']:.4f}")
+        print(f"Confidence = max(0, 1 - std/8.0) = max(0, 1 - {result['ensemble_std_f']:.2f}/8.0) = {result['confidence']:.4f}")
+        print(f"Model unanimity (direction-agnostic agreement): {result['model_unanimity']:.2f} "
+              f"({sum(result['per_model_vote'].values())}/{len(result['per_model_vote'])} models voted YES)")
+        print(f"Historical base rate: {result['base_rate']:.4f} "
+              f"({sum(1 for v in result['base_rate_years'])} years of real NASA POWER daily data, "
+              f"{result['base_rate_years'][0]}-{result['base_rate_years'][-1]})")
+        print(f"Method: {result['method']}")
+        print(f"Data freshness (fetched at): {result['data_freshness']}")
+
+        ok = (
+            len(result["per_source_values"]) >= 2
+            and 0.0 <= result["oracle_prob"] <= 1.0
+            and 0.0 <= result["confidence"] <= 1.0
+            and result["base_rate"] is not None
+        )
+        print(f"  [{'PASS' if ok else 'FAIL'}] >=2 models, oracle_prob and confidence in [0,1], base rate present")
+        all_checks.append(ok)
+
+    hdr("CORE-LAW CHECK")
+    import ast
+    import inspect
+    weather_source = inspect.getsource(weather)
+    tree = ast.parse(weather_source)
+    imported_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_names.add(node.module)
+    # An AST import scan can't be fooled by a comment/docstring that merely
+    # *mentions* "LLM" (a plain keyword grep on this file's own docstring,
+    # which explains the core law, would false-positive on the word "LLM" —
+    # caught during this phase's own build and replaced with this check).
+    llm_packages = {"openai", "anthropic", "cohere", "transformers", "langchain"}
+    matched = imported_names & llm_packages
+    print(f"Modules actually imported by weather.py: {sorted(imported_names)}")
+    print(f"LLM-SDK imports found: {matched or 'none'}")
+    core_law_ok = len(matched) == 0
+    print(f"  [{'PASS' if core_law_ok else 'FAIL'}] no LLM SDK is imported anywhere in the probability computation path")
+
+    hdr("GATE 2 — ACCEPTANCE CRITERIA")
+    checks = {
+        f"At least one market run per available strike type ({list(by_type.keys())})": len(all_checks) >= 1,
+        "Every tested market: >=2 models, probabilities in [0,1], base rate present": all(all_checks),
+        "No LLM SDK imported in the weather engine module (core-law check)": core_law_ok,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 2 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -347,6 +472,8 @@ def main():
         sys.exit(phase_0())
     elif args.phase == 1:
         sys.exit(phase_1())
+    elif args.phase == 2:
+        sys.exit(phase_2())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)

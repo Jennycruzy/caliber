@@ -42,6 +42,23 @@ Log format per entry: **What I needed → Where verified → What I found → Da
   ```
   This confirms resolution rules are verbatim, station-specific, and cite an exact official source document (NWS Climatological Report (Daily) for Chicago Midway) — exactly the level of precision Stage 1 must capture and Stage 2 must answer to.
 
+### 1.3 Station coordinates — the exact physical point Kalshi's rule refers to (verified, not guessed)
+- **Needed:** Kalshi's resolution rule names a specific NWS/GHCND station ("Central Park, New York", "Chicago Midway, IL") — the weather engine must forecast for that exact point, not a city centroid or an airport with a similar name.
+- **Verified:** WebSearch against NOAA NCDC station detail pages, 2026-07-08.
+  - **NY City Central Park, NY US** — GHCND:USW00094728 — 40°46'N, 73°58'W (40.7667, -73.9667). Source: https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00094728/detail
+  - **Chicago Midway Airport, IL US** — GHCND:USW00014819 — ~41.79N, -87.74W. Source: https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00014819/detail
+- **Found:** recorded in `src/rwoo/weather_stations.py` as a small, explicit registry keyed by Kalshi series ticker — a series with no verified station raises an error rather than silently guessing coordinates. Only these two stations are populated so far (the two series used in Phase 1/2 testing); more will be added and verified the same way as the daily loop (Phase 8) selects new series.
+
+### 1.4 NASA POWER — historical daily data for the climatological base rate
+- **Needed:** a keyless, live source of many years of real historical daily max-temperature observations at a given lat/lon, to compute an empirical base rate ("in 20 real past years, how often did this exact threshold get crossed on this calendar day") — independent of and a sanity check against the live model-ensemble probability.
+- **Verified:** live call, 2026-07-08:
+  ```
+  GET https://power.larc.nasa.gov/api/temporal/daily/point?parameters=T2M_MAX&community=RE
+      &longitude=-73.9667&latitude=40.7667&start=20050101&end=20241231&format=JSON
+  ```
+- **Found:** keyless, no auth. Returns one JSON object per day (`properties.parameter.T2M_MAX`, keyed `"YYYYMMDD"`, value in **Celsius**) — a full 20-year, 7305-day range came back in a single request. Real July 9 values pulled from the response: 2005=26.28°C, 2006=27.16°C, ... 2024=31.57°C (20 real values, converted to °F in code: `C * 9/5 + 32`). A documented fill value (`-999`) marks missing days — code guards against it (`celsius > -900`) rather than silently averaging in nonsense.
+- **Rate limits:** not yet hit; no auth key required for point queries.
+
 ---
 
 ## 2. Kalshi API
