@@ -33,10 +33,31 @@ disconnected from the call path.
 
 This build is phased, with a human-readable verification gate at the end of
 each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **Phase 5 complete**
+project depends on, and how it was verified). Currently: **Phase 6 complete**
 (foundations, market readers, the weather engine, edge computation with its
-reproducibility proof, the restraint layer, and conservative economics/sports
-baseline engines, plus a real no-lookahead weather calibration backtest).
+reproducibility proof, the restraint layer, economics/sports engines, a
+no-lookahead calibration backtest for weather and sports, an economics
+backtest path that is currently blocked by BLS's real daily quota in this
+workspace, and tamper-evident receipts with a real, corrected X Layer mainnet
+anchor).
+
+The calibration backtest code keeps full/no-cap paths, but the human-readable
+gate uses explicit runtime controls where live APIs are slow or quota-limited:
+- **Weather** can run across all 5 verified stations against every real
+  settled Kalshi market, bounded only by Open-Meteo's real archived-forecast
+  window. `verify.py --phase 5` defaults to 5 real records per station
+  (25 total) with progress output and a raw-response cache so the judge-facing
+  gate does not look frozen. Set `RWOO_WEATHER_GATE_RECORDS_PER_SERIES=0` for
+  the full no-cap run.
+- **Economics** scores every real settled core-CPI market using the actual
+  BLS release-date schedule (not calendar month) for a genuine no-lookahead
+  cutoff when BLS data is available. Today's workspace hit BLS's real
+  unauthenticated daily quota, so the gate discloses economics as incomplete
+  rather than fabricating a Brier score.
+- **Sports** scores every real per-team market from two real, resolved
+  tournaments (Euro 2024, Copa América 2024) using a self-computed Elo rating
+  history replayed from 49,506 real historical matches, because no public API
+  provides national-team ratings by arbitrary past date.
 
 ## Reproduce every claim
 
@@ -50,7 +71,8 @@ python3 verify.py --phase 1   # market readers: canonical objects from live mark
 python3 verify.py --phase 2   # weather engine: multi-model consensus + confidence
 python3 verify.py --phase 3   # edge computation + a live reproducibility proof
 python3 verify.py --phase 4   # restraint layer + live BLS economics and Elo sports baselines
-python3 verify.py --phase 5   # weather calibration record + no-lookahead backtest
+python3 verify.py --phase 5   # calibration backtest: weather/sports scored; economics quota disclosed
+python3 verify.py --phase 6   # receipts, tamper test, real X Layer mainnet anchor
 ```
 
 Both make live network calls and print the real responses plus a
@@ -82,9 +104,22 @@ or a canned pass.
     spread). Refuses non-actionable edges.
   - `calibration.py` — Brier score, reliability buckets, and transparent
     recalibration utilities.
-  - `backtests/weather.py` — Phase 5 weather calibration backtest using
-    finalized Kalshi markets plus Open-Meteo Single Runs forecasts available
-    before market open.
-  - (receipts, hash anchoring, public pages — later phases)
+  - `backtests/weather.py` — no-cap weather calibration backtest across all
+    verified stations, using finalized Kalshi markets plus Open-Meteo Single
+    Runs forecasts available before market open.
+  - `backtests/economics.py` — no-cap core-CPI calibration backtest using the
+    real BLS release-date schedule for a genuine no-lookahead cutoff.
+  - `backtests/sports_elo.py` — self-computed historical Elo ratings replayed
+    from a real 49,506-match public dataset (no public API gives national-team
+    Elo by arbitrary past date).
+  - `backtests/sports.py` — sports calibration backtest scoring real resolved
+    Polymarket tournament markets against as-of-date self-computed ratings.
+  - `receipts.py` — canonical JSON, real keccak256 commitments, and an
+    append-only hash-chained ledger with a tamper test.
+  - `xlayer.py` — X Layer RPC verification and on-chain anchor verification
+    (decodes the ERC-4337 `UserOperationEvent` to confirm the inner call
+    actually succeeded — an outer bundler-transaction receipt status alone is
+    not sufficient proof, learned the hard way; see Ledger §16.1).
+  - (OKX listing, daily proof loop, public pages — later phases)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

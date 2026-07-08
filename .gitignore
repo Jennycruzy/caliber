@@ -4,3 +4,4 @@ __pycache__/
 *.egg-info/
 .agents/
 skills-lock.json
+.cache/

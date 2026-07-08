@@ -9,9 +9,14 @@ the market open. If that proof fails, the record is refused.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import statistics
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable, Any
 
 import httpx
 
@@ -22,7 +27,9 @@ from rwoo.weather_stations import station_for_series
 
 SINGLE_RUNS_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 ARCHIVED_MODELS = ["ecmwf_ifs025", "gfs_global", "icon_global"]
-_SINGLE_RUN_CACHE: dict[tuple[float, float, str, str, str], float | None] = {}
+_SINGLE_RUN_CACHE: dict[tuple[float, float, str, str], dict[str, float]] = {}
+_DEFAULT_CACHE_DIR = Path(".cache/rwoo/open_meteo_single_runs")
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 def _get_with_retry(url: str, params: dict, timeout: float = 45, attempts: int = 3) -> httpx.Response:
@@ -37,6 +44,49 @@ def _get_with_retry(url: str, params: dict, timeout: float = 45, attempts: int =
             if attempt < attempts:
                 time.sleep(1.5 * attempt)
     raise last_exc
+
+
+def _cache_path(cache_key: tuple[float, float, str, str], cache_dir: str | Path | None = None) -> Path:
+    base = Path(cache_dir or os.environ.get("RWOO_OPEN_METEO_CACHE_DIR") or _DEFAULT_CACHE_DIR)
+    key_json = json.dumps(cache_key, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(key_json.encode("utf-8")).hexdigest()
+    return base / f"{digest}.json"
+
+
+def _load_cached_single_run(cache_key: tuple[float, float, str, str], cache_dir: str | Path | None = None) -> dict | None:
+    path = _cache_path(cache_key, cache_dir)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _store_cached_single_run(
+    cache_key: tuple[float, float, str, str],
+    params: dict,
+    raw_response: dict,
+    parsed_daily_max: dict[str, float],
+    cache_dir: str | Path | None = None,
+) -> None:
+    path = _cache_path(cache_key, cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "source_url": SINGLE_RUNS_URL,
+                "params": params,
+                "raw_response": raw_response,
+                "parsed_daily_max_f": parsed_daily_max,
+            },
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _parse_dt(value: str) -> datetime:
@@ -58,50 +108,75 @@ def _run_available_at(run: str) -> str:
     return (run_dt + timedelta(hours=6)).isoformat()
 
 
-def fetch_finalized_weather_markets(series_ticker: str = "KXHIGHNY", limit: int = 24) -> list[dict]:
-    resp = _get_with_retry(
-        f"{kalshi.BASE_URL}/markets",
-        params={"series_ticker": series_ticker, "status": "settled", "limit": limit},
-    )
-    markets = resp.json().get("markets", [])
-    return [m for m in markets if m.get("status") == "finalized" and m.get("result") in {"yes", "no"}]
+def fetch_finalized_weather_markets(series_ticker: str = "KXHIGHNY", page_size: int = 200) -> list[dict]:
+    """Paginates through ALL settled markets for a series — not one page.
+    There is no artificial cap here; the real ceiling is whatever Kalshi
+    actually has, discovered by following `cursor` until it's exhausted."""
+    all_markets: list[dict] = []
+    cursor = None
+    while True:
+        params = {"series_ticker": series_ticker, "status": "settled", "limit": page_size}
+        if cursor:
+            params["cursor"] = cursor
+        resp = _get_with_retry(f"{kalshi.BASE_URL}/markets", params=params)
+        data = resp.json()
+        page = data.get("markets", [])
+        all_markets.extend(page)
+        cursor = data.get("cursor")
+        if not cursor or not page:
+            break
+    return [m for m in all_markets if m.get("status") == "finalized" and m.get("result") in {"yes", "no"}]
 
 
-def fetch_single_run_daily_max(
+def fetch_single_run_all_models(
     lat: float,
     lon: float,
     target_date: str,
     run: str,
-    model: str,
     timezone_name: str = "America/New_York",
-) -> float | None:
-    cache_key = (round(lat, 4), round(lon, 4), target_date, run, model)
+    cache_dir: str | Path | None = None,
+) -> dict[str, float]:
+    """One HTTP call for all archived models at once (Single Runs supports
+    comma-separated `models=`, confirmed live) instead of one call per model
+    — this is what makes pulling hundreds of real records practical."""
+    cache_key = (round(lat, 4), round(lon, 4), target_date, run)
     if cache_key in _SINGLE_RUN_CACHE:
-        return _SINGLE_RUN_CACHE[cache_key]
+        return dict(_SINGLE_RUN_CACHE[cache_key])
+    cached = _load_cached_single_run(cache_key, cache_dir)
+    if cached and isinstance(cached.get("parsed_daily_max_f"), dict):
+        parsed = {k: float(v) for k, v in cached["parsed_daily_max_f"].items()}
+        _SINGLE_RUN_CACHE[cache_key] = dict(parsed)
+        return parsed
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "timezone": timezone_name,
+        "models": ",".join(ARCHIVED_MODELS),
+        "run": run,
+        "forecast_days": 4,
+    }
     resp = _get_with_retry(
         SINGLE_RUNS_URL,
-        params={
-            "latitude": lat,
-            "longitude": lon,
-            "hourly": "temperature_2m",
-            "temperature_unit": "fahrenheit",
-            "timezone": timezone_name,
-            "models": model,
-            "run": run,
-            "forecast_days": 4,
-        },
+        params=params,
+        timeout=25,
+        attempts=2,
     )
     data = resp.json()
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
-    temps = hourly.get("temperature_2m", [])
-    values = [temp for ts, temp in zip(times, temps) if ts.startswith(target_date) and temp is not None]
-    if not values:
-        _SINGLE_RUN_CACHE[cache_key] = None
-        return None
-    value = max(values)
-    _SINGLE_RUN_CACHE[cache_key] = value
-    return value
+    out: dict[str, float] = {}
+    for model in ARCHIVED_MODELS:
+        temps = hourly.get(f"temperature_2m_{model}")
+        if not temps:
+            continue
+        values = [t for ts, t in zip(times, temps) if ts.startswith(target_date) and t is not None]
+        if values:
+            out[model] = max(values)
+    _SINGLE_RUN_CACHE[cache_key] = dict(out)
+    _store_cached_single_run(cache_key, params, data, out, cache_dir)
+    return out
 
 
 def compute_archived_probability(market: dict, series_ticker: str = "KXHIGHNY") -> dict:
@@ -116,11 +191,7 @@ def compute_archived_probability(market: dict, series_ticker: str = "KXHIGHNY") 
         }
 
     station = station_for_series(series_ticker)
-    forecasts = {}
-    for model in ARCHIVED_MODELS:
-        value = fetch_single_run_daily_max(station.lat, station.lon, target_date, run, model)
-        if value is not None:
-            forecasts[model] = value
+    forecasts = fetch_single_run_all_models(station.lat, station.lon, target_date, run)
     if len(forecasts) < 2:
         return {
             "refused": True,
@@ -177,18 +248,46 @@ def compute_archived_probability(market: dict, series_ticker: str = "KXHIGHNY") 
     }
 
 
-def build_weather_backtest(max_records: int = 18, series_ticker: str = "KXHIGHNY") -> tuple[list[CalibrationRecord], list[dict]]:
+def build_weather_backtest_for_series(
+    series_ticker: str,
+    stop_after_successful: int | None = None,
+    progress: ProgressCallback | None = None,
+) -> tuple[list[CalibrationRecord], list[dict]]:
+    """No sample-size cap by default: every real finalized market for this
+    series is attempted. Records are only excluded by genuine constraints —
+    the no-lookahead check, or the archived-forecast source simply not
+    covering that date (Open-Meteo's Single Runs archive has a real, finite
+    rolling window; verified live rather than assumed, see
+    docs/VERIFICATION_LEDGER.md) — never by an arbitrary count.
+
+    `stop_after_successful` is NOT a data-scarcity cap — it exists only so a
+    caller that just needs to demonstrate the mechanism (e.g. Phase 6's
+    receipt demo) doesn't have to wait for hundreds of real records it
+    doesn't need. The real calibration backtest (Phase 5) never sets it."""
     records: list[CalibrationRecord] = []
     raw_rows = []
-    markets = fetch_finalized_weather_markets(series_ticker=series_ticker, limit=40)
-    # Prefer a spread of outcomes and strike types by taking recent finalized
-    # markets in API order until the requested sample is filled.
-    for market in markets:
-        if len(records) >= max_records:
+    markets = fetch_finalized_weather_markets(series_ticker=series_ticker)
+    if progress:
+        progress({"event": "series_markets_loaded", "series": series_ticker, "market_count": len(markets)})
+    for attempted, market in enumerate(markets, start=1):
+        if stop_after_successful is not None and len(records) >= stop_after_successful:
             break
-        result = compute_archived_probability(market, series_ticker=series_ticker)
+        try:
+            result = compute_archived_probability(market, series_ticker=series_ticker)
+        except Exception as exc:  # noqa: BLE001 — one flaky call must not abort a multi-hundred-record run
+            result = {"refused": True, "reason": f"network/parse error for this market: {exc}"}
         raw_rows.append({"market": market, "engine_result": result})
         if result.get("refused"):
+            if progress and (attempted == 1 or attempted % 25 == 0):
+                progress(
+                    {
+                        "event": "series_progress",
+                        "series": series_ticker,
+                        "attempted": attempted,
+                        "records": len(records),
+                        "refused": len(raw_rows) - len(records),
+                    }
+                )
             continue
         outcome = 1 if market["result"] == "yes" else 0
         record = CalibrationRecord(
@@ -206,4 +305,52 @@ def build_weather_backtest(max_records: int = 18, series_ticker: str = "KXHIGHNY
             target_date=result["target_date"],
         )
         records.append(record)
+        if progress and (len(records) == 1 or len(records) % 5 == 0):
+            progress(
+                {
+                    "event": "series_progress",
+                    "series": series_ticker,
+                    "attempted": attempted,
+                    "records": len(records),
+                    "refused": len(raw_rows) - len(records),
+                }
+            )
+    if progress:
+        progress(
+            {
+                "event": "series_done",
+                "series": series_ticker,
+                "attempted": len(raw_rows),
+                "records": len(records),
+                "refused": len(raw_rows) - len(records),
+                "stopped_after_successful": stop_after_successful,
+            }
+        )
     return records, raw_rows
+
+
+def build_weather_backtest(
+    series_tickers: list[str] | None = None,
+    stop_after_successful_per_series: int | None = None,
+    progress: ProgressCallback | None = None,
+) -> tuple[list[CalibrationRecord], list[dict]]:
+    """Runs the backtest across every verified weather station by default
+    (all of docs/VERIFICATION_LEDGER.md §1.3's registry) — not just NYC.
+    Real ceiling only: whatever Kalshi has settled and Open-Meteo's archive
+    still covers. `stop_after_successful_per_series` is an explicit runtime
+    control for verification/demo commands; leaving it as None runs the no-cap
+    path."""
+    from rwoo.weather_stations import STATIONS
+
+    series_tickers = series_tickers or list(STATIONS.keys())
+    all_records: list[CalibrationRecord] = []
+    all_raw_rows: list[dict] = []
+    for series_ticker in series_tickers:
+        records, raw_rows = build_weather_backtest_for_series(
+            series_ticker,
+            stop_after_successful=stop_after_successful_per_series,
+            progress=progress,
+        )
+        all_records.extend(records)
+        all_raw_rows.extend(raw_rows)
+    return all_records, all_raw_rows

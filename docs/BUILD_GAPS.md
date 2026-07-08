@@ -70,7 +70,11 @@ ledger's actual content is visible in a diff, not silent.
 
 Current status: incomplete.
 
-What exists: a conservative BLS-history baseline for core CPI markets.
+What exists: a conservative BLS-history baseline for core CPI markets, plus a
+no-lookahead backtest path that filters CPI observations by real release date.
+The current workspace hit BLS's unauthenticated daily quota before a full
+economics calibration score could be produced, and BLS's public flat-file
+mirror also returned HTTP 403 from here.
 
 Why incomplete: it is backward-looking official history, not a verified
 forward-looking consensus forecast distribution. It is useful for a safe
@@ -83,6 +87,8 @@ economic modeling.
 Completion criteria:
 
 - Verify a consensus forecast distribution source for CPI/PCE/NFP.
+- Provide `BLS_API_KEY` or rerun after BLS quota reset so the no-lookahead
+  economics backtest can produce real records and a Brier score.
 - Store raw pre-release forecast distributions with timestamps.
 - Backtest with no lookahead against resolved historical releases/markets.
 - Produce economics reliability curve and Brier score.
@@ -93,9 +99,12 @@ Completion criteria:
 Current status: incomplete.
 
 What exists: a conservative World Cup baseline using live World Football Elo
-ratings and two deterministic transforms.
+ratings and two deterministic transforms, plus a real sports calibration
+backtest for Euro 2024 and Copa America 2024 using self-computed historical
+Elo ratings replayed from real match history.
 
-Why incomplete: it is not a tournament simulator, does not model bracket path,
+Why incomplete: the calibration backtest is real but narrow. The production
+engine is still not a tournament simulator, does not model bracket path,
 qualification state, injuries/lineups, or multiple independent rating systems.
 
 Not covered by Phase 6: Phase 6 handles receipts and anchoring, not better
@@ -105,8 +114,8 @@ Completion criteria:
 
 - Add a proper simulator or multiple independent rating/projection sources.
 - Verify all source timestamps and data availability.
-- Backtest against resolved sports markets/events with no lookahead.
-- Produce sports reliability curve and Brier score.
+- Broaden no-lookahead backtests beyond two tournaments.
+- Keep producing sports reliability curves and Brier scores as the sample grows.
 - Recalibrate if the backtest proves miscalibration.
 
 ### Primary Kalshi fee schedule PDF

@@ -34,6 +34,31 @@ STATIONS: dict[str, Station] = {
         ghcnd_id="GHCND:USW00014819",
         source="https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00014819/detail",
     ),
+    # Verified 2026-07-08. Kalshi's resolution rule was checked live for each
+    # (rules_primary text) before picking the matching NOAA station — e.g.
+    # KXHIGHLAX names "Los Angeles Airport", not LA Downtown, so that's the
+    # station used here, not a same-city alternate.
+    "KXHIGHLAX": Station(
+        name="Los Angeles International Airport, CA US",
+        lat=33.93816,
+        lon=-118.3866,
+        ghcnd_id="GHCND:USW00023174",
+        source="https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00023174/detail",
+    ),
+    "KXHIGHMIA": Station(
+        name="Miami International Airport, FL US",
+        lat=25.78805,
+        lon=-80.31694,
+        ghcnd_id="GHCND:USW00012839",
+        source="https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00012839/detail",
+    ),
+    "KXHIGHDEN": Station(
+        name="Denver International Airport, CO US",
+        lat=39.8517,
+        lon=-104.6734,
+        ghcnd_id="GHCND:USW00003017",
+        source="https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00003017/detail",
+    ),
 }
 
 
