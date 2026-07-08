@@ -8,25 +8,22 @@ until a verification gate proves otherwise.
 
 ## Sequencing Decision
 
-Do **Phase 6 next** before upgrading economics/sports.
+Phase 6 is now **complete** (see below) — a real, correctly-verified X Layer
+mainnet anchor exists. Next up: **Phase 7** (OKX.AI listing + service
+registration + payment), since the real Agentic Wallet/Onchain OS skills are
+already installed and working in this workspace. Economics/sports model
+upgrades remain queued behind Phase 7+ — they don't block listing.
 
-Reason: Phase 6 provides the integrity backbone: receipts, append-only records,
-tamper detection, and X Layer anchoring. After that exists, every future
-economics/sports improvement can be recorded and proven under the same receipt
-system. Improving models before receipts would add model work while the
-"proven / cannot rewrite history" claim is still incomplete.
+Recommended order (updated):
 
-Recommended order:
-
-1. Before Phase 6, clean up quick primary-source verification gaps where
-   feasible: Kalshi fee schedule and primary hackathon rules/form.
-2. Phase 6: receipts, append-only ledger, tamper evidence, X Layer anchoring.
-3. Alongside Phase 6, verify X Layer RPC/path/cost facts needed for anchoring.
+1. ~~Before Phase 6, clean up quick primary-source verification gaps~~ — done.
+2. ~~Phase 6: receipts, append-only ledger, tamper evidence, X Layer anchoring~~ — done, including a corrected anchor after catching a false positive in the verifier (see docs/VERIFICATION_LEDGER.md §16.1).
+3. **Phase 7 next:** OKX.AI ASP listing, service registration, Payment SDK, a real pay-per-call round trip.
 4. Upgrade economics: verified consensus forecast source, no-lookahead backtest,
    calibration curve, Brier score.
 5. Upgrade sports: simulator or multiple independent rating sources,
    no-lookahead backtest, calibration curve, Brier score.
-6. Continue Phase 7+: OKX listing/payment, daily proof loop, public pages.
+6. Continue Phase 8+: daily proof loop, public pages.
 
 ## Immediate Checklist
 
@@ -45,20 +42,27 @@ Do in Phase 6:
 - [x] Add hash-chain or equivalent tamper detection.
 - [x] Add a tamper test to the verification harness.
 - [x] Verify X Layer RPC path.
-- [ ] Verify X Layer anchoring cost/token facts beyond RPC chain ID.
-- [ ] Verify the OKX Agentic Wallet transaction-signing flow for anchoring a
+- [x] Verify the OKX Agentic Wallet transaction-signing flow for anchoring a
       real commitment on X Layer mainnet.
-- [ ] If OKX Agentic Wallet anchoring is approved and available, anchor a real
-      commitment on X Layer mainnet and print the transaction/explorer evidence.
-- [x] If OKX Agentic Wallet anchoring is not yet verified/approved, make the
-      gate fail and mark that exact prerequisite honestly; do not fake an anchor.
+- [x] Anchor a real commitment on X Layer mainnet and print the
+      transaction/explorer evidence.
+- [x] Switch the local hash algorithm to real keccak256 (was sha3_256 — a
+      different algorithm despite the similar name).
+- [x] Fix a genuine false positive in the anchor verifier: this Agentic
+      Wallet is an ERC-4337 smart account, so an outer bundler-transaction
+      receipt status of "0x1" does NOT prove our inner UserOperation
+      executed — it can succeed at the outer level while the inner call
+      reverts. `verify_anchor_transaction()` now decodes the EntryPoint's
+      `UserOperationEvent` and requires `success == true` explicitly. This
+      caught and invalidated the first anchor attempt, which had silently
+      reverted. See docs/VERIFICATION_LEDGER.md §16.1 for the full account.
 
-Current Phase 6 blocker:
-
-- `python3 verify.py --phase 6` passes local integrity checks but fails the
-  full gate because the OKX Agentic Wallet anchoring flow is not yet
-  verified/approved. Do not mark Gate 6 complete until a real X Layer mainnet
-  transaction/explorer link is produced through that path.
+Phase 6 status: **complete.** `python3 verify.py --phase 6` passes every
+check, including a real, correctly-verified X Layer mainnet anchor
+transaction (0x655d283549f0e809985a7fa401b1a8a14b6ad1419e3ebd15dd57424950c53ef2).
+`data/anchors/phase6_anchor.json` and `data/receipts/phase6_anchor.jsonl` are
+now tracked in git so any future drift between the anchored hash and the
+ledger's actual content is visible in a diff, not silent.
 
 ## Gaps From Completed Phases Not Fully Covered By The Immediate Next Phase
 

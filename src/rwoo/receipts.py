@@ -1,21 +1,22 @@
 """Receipt commitments and append-only ledger.
 
-Phase 6 local integrity is fully deterministic: canonical JSON -> SHA3-256
+Phase 6 local integrity is fully deterministic: canonical JSON -> keccak256
 record hash -> hash chain. X Layer anchoring should go through the verified OKX
 Agentic Wallet path; the verification harness reports that prerequisite
 honestly instead of pretending a local hash is an on-chain anchor.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from Crypto.Hash import keccak
 
-HASH_ALGORITHM = "sha3_256_local_commitment"
+
+HASH_ALGORITHM = "keccak256"
 GENESIS_PREV_HASH = "0" * 64
 
 
@@ -37,7 +38,9 @@ def canonical_json(value: Any) -> str:
 
 
 def hash_hex(value: Any) -> str:
-    return hashlib.sha3_256(canonical_json(value).encode("utf-8")).hexdigest()
+    digest = keccak.new(digest_bits=256)
+    digest.update(canonical_json(value).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def make_receipt_payload(

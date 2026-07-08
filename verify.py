@@ -1199,11 +1199,32 @@ def phase_6():
         failures.append("tamper test")
 
     hdr("X LAYER MAINNET ANCHOR ATTEMPT")
-    head_hash = verify_result.get("head_hash") if verify_result else None
-    if head_hash:
-        anchor_result = xlayer.anchor_commitment(head_hash)
-    else:
-        anchor_result = {"anchored": False, "reason": "no ledger head hash available"}
+    anchor_meta_path = Path("data/anchors/phase6_anchor.json")
+    anchored_ledger_path = Path("data/receipts/phase6_anchor.jsonl")
+    try:
+        anchor_meta = json.loads(anchor_meta_path.read_text(encoding="utf-8"))
+        anchored_ledger = receipts.AppendOnlyLedger(anchored_ledger_path)
+        anchored_ledger_result = anchored_ledger.verify()
+        show_json("Anchored ledger verification result", anchored_ledger_result, max_chars=1200)
+        show_json("Anchor metadata", anchor_meta, max_chars=1800)
+        anchored_ledger_ok = (
+            anchored_ledger_result.get("valid") is True
+            and anchored_ledger_result.get("head_hash") == anchor_meta.get("commitment_hash")
+        )
+        print(
+            f"  [{'PASS' if anchored_ledger_ok else 'FAIL'}] stored anchored ledger head matches commitment hash"
+        )
+        anchor_result = xlayer.anchor_commitment(
+            anchor_meta["commitment_hash"],
+            tx_hash=anchor_meta["transaction_hash"],
+            wallet_address=anchor_meta["wallet_address"],
+        )
+        if not anchored_ledger_ok:
+            failures.append("anchored ledger")
+    except Exception as exc:  # noqa: BLE001
+        anchor_result = {"anchored": False, "reason": f"anchor proof load/verification failed: {exc}"}
+        anchored_ledger_ok = False
+        failures.append("anchor proof")
     show_json("Anchor result", anchor_result, max_chars=1800)
     anchor_ok = bool(anchor_result.get("anchored"))
     if anchor_ok:
@@ -1236,6 +1257,7 @@ def phase_6():
         "Real verdict committed as a receipt payload": receipt_payload_ok,
         "Append-only hash-chained ledger verifies": ledger_ok,
         "Tamper test detects altered verdict probability": tamper_ok,
+        "Stored anchored ledger verifies and matches commitment": anchored_ledger_ok,
         "Real X Layer mainnet anchor produced": anchor_ok,
         "No LLM SDK anywhere in receipt/anchoring paths": core_law_ok,
         "No local integrity failures": len(failures) == 0,

@@ -1,0 +1,20 @@
+{
+  "anchor_type": "agentic_wallet_contract_call_calldata_commitment",
+  "chain": "X Layer mainnet",
+  "chain_id": 196,
+  "wallet_address": "0x38c3299ee0e771e8d0a756e1a5dd4b8a8e9930ca",
+  "to_address": "0x000000000000000000000000000000000000dEaD",
+  "commitment_hash": "713fd39961a27c7b2c4ee54d6a17bae67a80f08a1edcf4075da948e00bade446",
+  "transaction_hash": "0x655d283549f0e809985a7fa401b1a8a14b6ad1419e3ebd15dd57424950c53ef2",
+  "order_id": "1763795153336066246",
+  "explorer_url": "https://www.oklink.com/xlayer/tx/0x655d283549f0e809985a7fa401b1a8a14b6ad1419e3ebd15dd57424950c53ef2",
+  "submitted_command": "/home/codespace/.local/bin/onchainos wallet contract-call --chain 196 --to 0x000000000000000000000000000000000000dEaD --amt 0 --input-data 0x713fd39961a27c7b2c4ee54d6a17bae67a80f08a1edcf4075da948e00bade446 --biz-type dapp --strategy rwoo-receipt-anchor",
+  "submitted_at_utc": "2026-07-08T16:45:53Z",
+  "user_operation_hash": "0x91820d07b00dbec564b988c335c76de277937a945087d093f8cc04444aa16d42",
+  "user_operation_success": true,
+  "supersedes": {
+    "transaction_hash": "0xb636da3142cf3ba6b4e1b4a06b52fae3889ec2fbcc29456437852d8e7f55b64d",
+    "commitment_hash": "b91aed9ddbb878a74d30dd037e0353811668ab51218fcd601b2f44519064b710",
+    "reason": "invalid on two independent grounds: (1) computed with sha3_256 instead of the required keccak256, and (2) its inner ERC-4337 UserOperation reverted (success=false in the EntryPoint's UserOperationEvent) even though the outer bundler transaction's receipt showed status 0x1 — the outer receipt status alone does not prove an ERC-4337 self-call executed. See docs/VERIFICATION_LEDGER.md."
+  }
+}
