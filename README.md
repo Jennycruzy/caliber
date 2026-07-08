@@ -33,7 +33,7 @@ disconnected from the call path.
 
 This build is phased, with a human-readable verification gate at the end of
 each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **Phase 0 complete.**
+project depends on, and how it was verified). Currently: **Phase 1 complete** (Phase 0 foundations + Phase 1 market readers).
 
 ## Reproduce every claim
 
@@ -42,19 +42,23 @@ yourself:
 
 ```bash
 pip install -r requirements.txt
-python3 verify.py --phase 0
+python3 verify.py --phase 0   # foundations: live Open-Meteo, Kalshi, Polymarket calls
+python3 verify.py --phase 1   # market readers: canonical objects from live markets
 ```
 
-This makes live calls to Open-Meteo, Kalshi, and Polymarket and prints their
-real responses plus a plain-English PASS/FAIL for each acceptance criterion —
-nothing is a fixture or a canned pass.
+Both make live network calls and print the real responses plus a
+plain-English PASS/FAIL for each acceptance criterion — nothing is a fixture
+or a canned pass.
 
 ## Repo layout
 
 - `verify.py` — the verification harness; one gate per build phase.
 - `docs/VERIFICATION_LEDGER.md` — every external fact (API shapes, OKX
   integration mechanics, chain facts) verified live, with evidence and dates.
-- `src/rwoo/` — the engine (market readers, probability engines, edge/restraint
-  logic, calibration record, receipts) — built out phase by phase.
+- `src/rwoo/` — the engine, built out phase by phase:
+  - `models.py` — the canonical market object.
+  - `domain.py` — deterministic weather/economics/sports/other routing.
+  - `readers/kalshi.py`, `readers/polymarket.py` — Stage 1 market readers.
+  - (probability engines, edge/restraint logic, calibration record, receipts — later phases)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

@@ -2,7 +2,7 @@
 """
 Real-World Odds Oracle — verification harness.
 
-Run: python3 verify.py --phase 0
+Run: python3 verify.py --phase 0   (or --phase 1, etc.)
 
 This script makes REAL live calls to real external APIs and prints a
 plain-English report a non-programmer can read end to end, followed by an
@@ -11,12 +11,14 @@ to fake a pass — if an API is unreachable, the check FAILs honestly.
 """
 import argparse
 import json
+import os
 import sys
 import textwrap
-
 import time
 
 import httpx
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 RULE = "=" * 78
 
@@ -253,6 +255,89 @@ def phase_0():
     return 0 if all_pass else 1
 
 
+def phase_1():
+    from rwoo.readers import kalshi, polymarket
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 1")
+    print("GATE 1: Market readers (Stage 1) — canonical objects from real live markets")
+    print(RULE)
+    print()
+    print("What this checks: for several REAL, currently-open markets across both")
+    print("venues (Kalshi, Polymarket) and all three domains (weather, economics,")
+    print("sports), can the reader produce a canonical object whose resolution rule")
+    print("and implied probability a non-programmer could read and trust?")
+
+    canonical_markets = []
+    failures = []
+
+    kalshi_events = [
+        ("KXHIGHNY-26JUL08", "weather — NYC daily high temperature"),
+        ("KXPCECORE-26NOV", "economics — core PCE inflation"),
+        ("KXNFLDROTY-27", "sports — NFL Defensive Rookie of the Year"),
+    ]
+    for event_ticker, label in kalshi_events:
+        hdr(f"KALSHI — {label} (event {event_ticker})")
+        try:
+            markets = kalshi.fetch_markets_for_event(event_ticker)
+            # Prefer a market that's genuinely trading in a normal range (not a
+            # near-0%/near-100% tail contract) for an honest, representative example.
+            mid_range = [m for m in markets if m.spread > 0 and 0.05 <= m.implied_prob <= 0.95]
+            traded = mid_range or [m for m in markets if m.spread > 0]
+            m = traded[0] if traded else markets[0]
+            print(m.describe())
+            print()
+            print(f"  -> implied probability derivation: (yes_bid + yes_ask) / 2 from live Kalshi quotes")
+            ok = bool(m.resolution_rule) and bool(m.resolution_source) and 0.0 <= m.implied_prob <= 1.0
+            print(f"  [{'PASS' if ok else 'FAIL'}] resolution rule + source present, probability in [0,1]")
+            if not ok:
+                failures.append(f"Kalshi {event_ticker}")
+            canonical_markets.append(m)
+        except Exception as exc:  # noqa: BLE001
+            print(f"FAIL: live call raised an error: {exc}")
+            failures.append(f"Kalshi {event_ticker}")
+
+    hdr("POLYMARKET — mixed live markets (no domain filter available server-side)")
+    try:
+        pmarkets = polymarket.fetch_canonical_markets(limit=5)
+        for m in pmarkets[:3]:
+            print(m.describe())
+            print()
+            print(f"  -> implied probability derivation: (bestBid + bestAsk) / 2 from live Gamma API quotes")
+            ok = bool(m.resolution_rule) and 0.0 <= m.implied_prob <= 1.0
+            print(f"  [{'PASS' if ok else 'FAIL'}] resolution rule present, probability in [0,1]")
+            if not ok:
+                failures.append(f"Polymarket {m.market_id}")
+            canonical_markets.append(m)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: live call raised an error: {exc}")
+        failures.append("Polymarket fetch")
+
+    hdr("GATE 1 — ACCEPTANCE CRITERIA")
+    domains_seen = {m.domain for m in canonical_markets}
+    venues_seen = {m.venue for m in canonical_markets}
+    checks = {
+        f"At least 5 real canonical market objects built (got {len(canonical_markets)})": len(canonical_markets) >= 5,
+        f"Both venues represented (got {sorted(venues_seen)})": venues_seen == {"kalshi", "polymarket"},
+        f"At least 2 of 3 domains represented among Kalshi markets (got {sorted(domains_seen)})": len(domains_seen & {"weather", "economics", "sports"}) >= 2,
+        "Every object has a non-empty verbatim resolution rule": all(bool(m.resolution_rule) for m in canonical_markets),
+        "Every implied probability is a valid midpoint in [0,1]": all(0.0 <= m.implied_prob <= 1.0 for m in canonical_markets),
+        "No live-call failures": len(failures) == 0,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 1 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -260,6 +345,8 @@ def main():
 
     if args.phase == 0:
         sys.exit(phase_0())
+    elif args.phase == 1:
+        sys.exit(phase_1())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)
