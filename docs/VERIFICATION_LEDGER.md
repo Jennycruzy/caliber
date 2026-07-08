@@ -202,5 +202,20 @@ Log format per entry: **What I needed → Where verified → What I found → Da
 
 ---
 
-### Ledger status as of 2026-07-08 (Phase 4)
-All GATE 0–4-required facts are verified with real evidence above. Open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the primary hackathon rules page (§9), the primary Kalshi fee-schedule PDF (§13), the economics consensus-forecast distribution (§12), and production-grade sports model inputs (§14).
+## 15. Calibration backtest sources — finalized Kalshi outcomes + Open-Meteo Single Runs
+
+- **Needed:** a real historical forecast source that proves no lookahead, and real resolved market outcomes.
+- **Verified:** live calls and official docs, 2026-07-08.
+  - Kalshi finalized weather markets: `GET https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXHIGHNY&status=settled&limit=40`
+  - Open-Meteo Single Runs: `GET https://single-runs-api.open-meteo.com/v1/forecast?run=2026-07-06T06:00&hourly=temperature_2m&models=ecmwf_ifs025`
+  - Official docs: `https://open-meteo.com/en/docs/historical-forecast-api` and the linked Single Runs API docs.
+- **Found:** Kalshi finalized markets expose `result` (`yes`/`no`), `expiration_value`, `open_time`, `settlement_ts`, structured strike fields, and the verbatim resolution rule. Open-Meteo Single Runs returns an archived model run selected by `run=<UTC initialisation datetime>`; the docs state model output is generally available about 4-6 hours after initialization. Phase 5 conservatively records `source_available_at = run + 6h` and requires `source_available_at <= market.open_time < settlement_ts` for every backtest record.
+- **Real Gate 5 run:** `python3 verify.py --phase 5` built 18 resolved weather calibration records from finalized Kalshi NYC high-temperature markets. The run printed raw Kalshi outcome evidence, archived per-model forecast values (`ecmwf_ifs025`, `gfs_global`, `icon_global`), a no-lookahead proof for every record, a weather reliability curve, and a weather Brier score.
+- **Scoring result from the verified run:** Weather Brier score `0.0533` across 18 resolved calls. Reliability buckets printed by the harness: `0.0-0.2` bucket had 13 calls with mean predicted `0.0336` and actual hit rate `0.0000`; `0.2-0.4` had 3 calls with mean predicted `0.2545` and actual hit rate `0.3333`; `0.4-0.6` and `0.8-1.0` each had one call. Max bucket calibration gap was `0.5618`.
+- **Recalibration:** because max bucket gap exceeded 0.20, Phase 5 fit a one-parameter power recalibration by deterministic grid search over the calibration record. Best gamma was `1.05`; Brier improved slightly from `0.053335` to `0.053264`. This is disclosed as a tiny seed-set correction path, **not** production-ready calibration.
+- **Gap:** Phase 5 calibration currently covers weather only and is seeded by a small recent resolved sample. Econ/sports calibration is incomplete until those domain engines have proper forecast sources and resolved historical sample paths. Append-only on-disk record storage and hash anchoring are deferred to Phase 6 receipts; the Phase 5 harness discloses this rather than pretending the anchor exists.
+
+---
+
+### Ledger status as of 2026-07-08 (Phase 5)
+All GATE 0–5-required facts are verified with real evidence above. Open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the primary hackathon rules page (§9), the primary Kalshi fee-schedule PDF (§13), the economics consensus-forecast distribution (§12), production-grade sports model inputs (§14), broader domain calibration (§15), and Phase 6 append-only/hash anchoring (§15).

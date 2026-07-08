@@ -33,10 +33,10 @@ disconnected from the call path.
 
 This build is phased, with a human-readable verification gate at the end of
 each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **Phase 4 complete**
+project depends on, and how it was verified). Currently: **Phase 5 complete**
 (foundations, market readers, the weather engine, edge computation with its
 reproducibility proof, the restraint layer, and conservative economics/sports
-baseline engines).
+baseline engines, plus a real no-lookahead weather calibration backtest).
 
 ## Reproduce every claim
 
@@ -50,6 +50,7 @@ python3 verify.py --phase 1   # market readers: canonical objects from live mark
 python3 verify.py --phase 2   # weather engine: multi-model consensus + confidence
 python3 verify.py --phase 3   # edge computation + a live reproducibility proof
 python3 verify.py --phase 4   # restraint layer + live BLS economics and Elo sports baselines
+python3 verify.py --phase 5   # weather calibration record + no-lookahead backtest
 ```
 
 Both make live network calls and print the real responses plus a
@@ -79,6 +80,11 @@ or a canned pass.
     the oracle's own uncertainty band, source freshness, source/model agreement,
     and real trading friction (Kalshi's published fee formula + the live
     spread). Refuses non-actionable edges.
-  - (calibration record, receipts — later phases)
+  - `calibration.py` — Brier score, reliability buckets, and transparent
+    recalibration utilities.
+  - `backtests/weather.py` — Phase 5 weather calibration backtest using
+    finalized Kalshi markets plus Open-Meteo Single Runs forecasts available
+    before market open.
+  - (receipts, hash anchoring, public pages — later phases)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

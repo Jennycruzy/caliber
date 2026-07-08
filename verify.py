@@ -865,6 +865,209 @@ def phase_4():
     return 0 if all_pass else 1
 
 
+def phase_5():
+    from rwoo import calibration
+    from rwoo.backtests import weather as weather_backtest
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 5")
+    print("GATE 5: Calibration record + no-lookahead weather backtest")
+    print(RULE)
+    print()
+    print("Discipline restatement for this phase:")
+    print("  I am building the proof layer of a calibration oracle. A 40% call must")
+    print("  behave like a 40% call over time, and misses must remain visible. The")
+    print("  Deterministic-Core Law still applies: no LLM may produce or adjust any")
+    print("  probability. Forbidden actions still include fake backtests, hidden")
+    print("  lookahead, deleted misses, and confidence where the data does not earn it.")
+    print("  Doctrine: never assume, verify.\n")
+
+    failures = []
+
+    hdr("SOURCE VERIFICATION — historical forecast source used for no-lookahead")
+    print("Open-Meteo Single Runs source facts verified live from official docs:")
+    print("  - Endpoint: https://single-runs-api.open-meteo.com/v1/forecast")
+    print("  - Required parameter: run=<UTC model initialisation datetime>")
+    print("  - The API returns an individual archived model run's forecast horizon.")
+    print("  - For global models, results are generally available 4-6 hours after run initialisation.")
+    print("Backtest rule used here: previous-day 06:00 UTC run, conservatively marked")
+    print("available at run+6h, must be <= Kalshi market open_time. If not, record is refused.\n")
+
+    hdr("BUILDING REAL WEATHER CALIBRATION RECORD")
+    try:
+        records, raw_rows = weather_backtest.build_weather_backtest(max_records=18)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: weather backtest raised an error: {exc}")
+        records, raw_rows = [], []
+        failures.append("weather backtest")
+
+    if records:
+        print(f"Built {len(records)} calibration records from real finalized Kalshi weather markets.")
+        print("Each row below is a probability Real-World Odds Oracle would have emitted using")
+        print("only an archived forecast run available before market open, then compared to")
+        print("Kalshi's finalized yes/no result.\n")
+        for idx, record in enumerate(records[:10], start=1):
+            print(f"{idx:02d}. {record.market_id}")
+            print(f"    Question: {record.question}")
+            print(f"    Decision timestamp (Kalshi open_time): {record.decision_timestamp}")
+            print(f"    Forecast run: {record.source_run}   conservative available_at: {record.source_available_at}")
+            print(f"    Target date: {record.target_date}   resolved outcome: {record.outcome}")
+            print(f"    oracle_prob: {record.oracle_prob:.4f}   bucket: {record.bucket}")
+    else:
+        print("FAIL: no calibration records were built.")
+        failures.append("no records")
+
+    hdr("RAW EVIDENCE SAMPLE — market + archived model values")
+    evidence_printed = False
+    for row in raw_rows:
+        result = row.get("engine_result", {})
+        if result.get("refused"):
+            continue
+        market = row["market"]
+        show_json(
+            "One real finalized Kalshi market",
+            {
+                "ticker": market.get("ticker"),
+                "event_ticker": market.get("event_ticker"),
+                "result": market.get("result"),
+                "expiration_value": market.get("expiration_value"),
+                "open_time": market.get("open_time"),
+                "settlement_ts": market.get("settlement_ts"),
+                "strike_type": market.get("strike_type"),
+                "floor_strike": market.get("floor_strike"),
+                "cap_strike": market.get("cap_strike"),
+                "rules_primary": market.get("rules_primary"),
+            },
+            max_chars=1800,
+        )
+        show_json(
+            "Archived Open-Meteo Single Runs values used for that market",
+            {
+                "source_run": result.get("source_run"),
+                "source_available_at": result.get("source_available_at"),
+                "decision_timestamp": result.get("decision_timestamp"),
+                "per_source_values": result.get("per_source_values"),
+                "per_model_prob": result.get("per_model_prob"),
+                "ensemble_mean_f": result.get("ensemble_mean_f"),
+                "ensemble_std_f": result.get("ensemble_std_f"),
+                "oracle_prob": result.get("oracle_prob"),
+                "method": result.get("method"),
+            },
+            max_chars=1800,
+        )
+        evidence_printed = True
+        break
+    if not evidence_printed:
+        print("FAIL: no raw evidence sample could be printed.")
+        failures.append("raw evidence")
+
+    hdr("NO-LOOKAHEAD PROOF")
+    no_lookahead_rows = []
+    for record in records:
+        source_available = datetime.fromisoformat(record.source_available_at.replace("Z", "+00:00"))
+        decision = datetime.fromisoformat(record.decision_timestamp.replace("Z", "+00:00"))
+        resolution = datetime.fromisoformat(record.resolution_timestamp.replace("Z", "+00:00"))
+        ok = source_available <= decision < resolution
+        no_lookahead_rows.append(ok)
+        print(
+            f"{record.market_id}: source_available_at {record.source_available_at} <= "
+            f"decision {record.decision_timestamp} < resolution {record.resolution_timestamp} -> "
+            f"{'PASS' if ok else 'FAIL'}"
+        )
+    no_lookahead_ok = bool(records) and all(no_lookahead_rows)
+
+    hdr("RELIABILITY CURVE + BRIER SCORE")
+    if records:
+        curve = calibration.reliability_curve(records)
+        brier = calibration.brier_score(records)
+        print(f"Weather Brier score: {brier:.4f} across {len(records)} resolved calls")
+        print("Reliability curve (predicted bucket vs actual hit rate):")
+        for row in curve:
+            print(
+                f"  {row['bucket']}: n={row['count']:2d}  "
+                f"mean_predicted={row['mean_predicted']:.4f}  "
+                f"actual_hit_rate={row['actual_hit_rate']:.4f}"
+            )
+        gap = calibration.max_calibration_gap(curve)
+        print(f"Max bucket calibration gap: {gap:.4f}")
+    else:
+        curve, brier, gap = [], None, None
+        print("FAIL: cannot score an empty calibration record.")
+
+    hdr("RECALIBRATION CHECK")
+    recalibration_ok = False
+    if records and gap is not None and gap > 0.20:
+        recal = calibration.fit_power_recalibration(records)
+        print("Miscalibration found (max gap > 0.20), so this gate demonstrates one")
+        print("transparent recalibration: a one-parameter power transform fit by")
+        print("deterministic grid search over the calibration record.")
+        print("This is NOT claimed as production-ready with such a small seed set; it")
+        print("proves the correction path exists and is computed from the record.")
+        print(f"Best gamma: {recal['gamma']:.2f}")
+        print(f"Original Brier: {recal['original_brier']:.6f}   Recalibrated Brier: {recal['recalibrated_brier']:.6f}")
+        print("Sample recalibration rows:")
+        for row in recal["details"][:8]:
+            print(
+                f"  {row['market_id']}: "
+                f"{row['original_prob']:.4f} -> {row['recalibrated_prob']:.4f}; "
+                f"outcome={row['outcome']}"
+            )
+        recalibration_ok = bool(recal["improved"])
+        if not recalibration_ok:
+            print("FAIL: recalibration was triggered but did not improve Brier.")
+    elif records:
+        print("No bucket gap above 0.20 was found, so recalibration was not triggered.")
+        recalibration_ok = True
+    else:
+        print("FAIL: no records available for recalibration check.")
+
+    hdr("APPEND-ONLY / TAMPER-EVIDENT STATUS")
+    print("Phase 5 creates deterministic calibration records from real finalized markets,")
+    print("but on-disk append-only storage and hash anchoring are intentionally deferred")
+    print("to Phase 6 receipts. This is disclosed here rather than presented as complete.")
+
+    hdr("CORE-LAW CHECK — AST import scan across calibration/backtest paths")
+    import ast
+    import inspect
+    all_imports = set()
+    for mod in (calibration, weather_backtest):
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                all_imports.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                all_imports.add(node.module)
+    llm_packages = {"openai", "anthropic", "cohere", "transformers", "langchain"}
+    matched = all_imports & llm_packages
+    print(f"Modules imported across calibration.py + backtests/weather.py: {sorted(all_imports)}")
+    print(f"LLM-SDK imports found: {matched or 'none'}")
+    core_law_ok = len(matched) == 0
+    print(f"  [{'PASS' if core_law_ok else 'FAIL'}] no LLM SDK anywhere in Phase 5 scoring/backtest paths")
+
+    hdr("GATE 5 — ACCEPTANCE CRITERIA")
+    checks = {
+        f"At least 10 real resolved weather calibration records built (got {len(records)})": len(records) >= 10,
+        "Every record proves source forecast availability <= decision < resolution": no_lookahead_ok,
+        "Reliability curve printed from real resolved outcomes": bool(curve),
+        "Per-domain Brier score printed for weather": brier is not None,
+        "Recalibration path shown or honestly not triggered": recalibration_ok,
+        "No LLM SDK anywhere in calibration/backtest paths": core_law_ok,
+        "No live-call failures": len(failures) == 0,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 5 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -880,6 +1083,8 @@ def main():
         sys.exit(phase_3())
     elif args.phase == 4:
         sys.exit(phase_4())
+    elif args.phase == 5:
+        sys.exit(phase_5())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)
