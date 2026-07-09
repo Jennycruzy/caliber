@@ -1782,11 +1782,16 @@ def phase_8():
         record for record in limitless_records
         if record.get("oracle_prob") is not None
     ]
+    # Every priced Limitless record must carry a QUANTIFIED fee term: the
+    # conservative upper bound of the official published taker buy-fee table
+    # (see edge.py). fee = total_friction - half_spread must therefore be
+    # strictly positive, and the fee_missing dead-end must be gone.
     limitless_fee_ok = bool(priced_limitless_records) and all(
-        record.get("coverage_status") == "fee_missing"
+        record.get("total_friction") is not None
+        and record.get("total_friction") - (record.get("spread") or 0) / 2 > 0
+        and record.get("coverage_status") != "fee_missing"
         for record in priced_limitless_records
     )
-    limitless_no_actionable_ok = all(not record.get("actionable") for record in limitless_records)
     unsupported_included_ok = bool(included_unsupported_reasons) and any(
         reason.startswith("limitless_") for reason in included_unsupported_reasons
     )
@@ -1811,7 +1816,7 @@ def phase_8():
         "Limitless live API was read as a venue": limitless_seen_ok,
         "Limitless grouped markets were flattened into child markets": limitless_group_ok,
         "Unsupported Limitless domain shapes were included as non-actionable records": unsupported_included_ok and domain_records_included_ok,
-        "Limitless fee gap prevents actionable status": limitless_fee_ok and limitless_no_actionable_ok,
+        "Priced Limitless records carry the official upper-bound fee term": limitless_fee_ok,
         "Scanner artifacts can be written": artifacts_ok,
         "Scanner completed with <=5% item-level source errors": scanner_resilience_ok,
     }

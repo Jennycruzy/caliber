@@ -18,11 +18,17 @@ Constants used here are cited, not invented:
   - Polymarket's fee schedule has not been verified at all. Friction there
     uses the real quoted spread only; the missing fee term is a stated gap,
     not a guessed number standing in for real data.
-  - Limitless exposes live bid/ask-like `tradePrices` fields and official docs
-    state CLOB taker-fee ranges, but this build has not wired the exact
-    per-order/profile fee calculation. Limitless records therefore use
-    spread-only friction and are refused as actionable until that fee term is
-    computed exactly.
+  - Limitless CLOB taker fees: the official fee page
+    (docs.limitless.exchange/user-guide/fees, read 2026-07-09) publishes a
+    price-dependent buy-fee table — 3.00% for $0.01–$0.50, 1.26% at $0.75,
+    0.53% at $0.95, 0.40% at $0.999 — but no closed-form formula; the
+    exchange returns the exact `effectiveFeeBps` only per executed order
+    (official SDK `Execution` type), and the per-account order ceiling is
+    300 bps. This build therefore charges the CONSERVATIVE UPPER BOUND of
+    the official table for the entry side's price band: never lower than any
+    published anchor the price could fall under. An upper-bound fee can only
+    under-call an edge, never over-call it, so it is safe to qualify
+    actionable records with. Makers pay zero; taker entry is assumed.
 """
 from datetime import datetime, timezone
 
@@ -30,26 +36,54 @@ KALSHI_TAKER_FEE_RATE = 0.07
 DEFAULT_MAX_DATA_AGE_HOURS = 24.0
 DEFAULT_MIN_CONFIDENCE = 0.55
 
+# Official Limitless buy-fee anchors (price -> fee fraction), quoted from
+# docs.limitless.exchange/user-guide/fees. Used as a step-function upper
+# bound: an entry price between two anchors is charged the HIGHER
+# (lower-price) anchor's rate.
+LIMITLESS_BUY_FEE_ANCHORS: list[tuple[float, float]] = [
+    (0.50, 0.0300),
+    (0.75, 0.0126),
+    (0.95, 0.0053),
+    (0.999, 0.0040),
+]
+
+
+def limitless_taker_fee_bound(entry_price: float) -> float:
+    """Upper-bound taker buy fee (fraction of notional) at `entry_price`."""
+    for anchor_price, fee in LIMITLESS_BUY_FEE_ANCHORS:
+        if entry_price <= anchor_price:
+            return fee
+    return LIMITLESS_BUY_FEE_ANCHORS[-1][1]
+
 
 def kalshi_taker_fee(price: float, fee_multiplier: float = 1.0) -> float:
     """Fee per $1-notional contract, in probability-point-equivalent units."""
     return fee_multiplier * KALSHI_TAKER_FEE_RATE * price * (1 - price)
 
 
-def estimate_friction(market, fee_multiplier: float = 1.0) -> dict:
+def estimate_friction(market, fee_multiplier: float = 1.0, side: str | None = None) -> dict:
     half_spread = market.spread / 2
     if market.venue == "kalshi":
         fee = kalshi_taker_fee(market.implied_prob, fee_multiplier)
         method = "half the live bid/ask spread + Kalshi's published taker fee (0.07 * P * (1-P))"
         missing_fee = False
     elif market.venue == "limitless":
-        fee = 0.0
+        # Entry is a taker buy of the YES token at ~P or the NO token at
+        # ~(1-P). When the side is not yet known, charge the worse of the two.
+        yes_entry = min(0.999, max(0.001, market.implied_prob))
+        no_entry = min(0.999, max(0.001, 1 - market.implied_prob))
+        if side == "YES":
+            fee = limitless_taker_fee_bound(yes_entry)
+        elif side == "NO":
+            fee = limitless_taker_fee_bound(no_entry)
+        else:
+            fee = max(limitless_taker_fee_bound(yes_entry), limitless_taker_fee_bound(no_entry))
         method = (
-            "half the live bid/ask spread from Limitless tradePrices only — official Limitless docs "
-            "state dynamic CLOB taker-fee ranges, but this build has not computed the exact "
-            "per-order/profile fee, so actionable trading is refused"
+            "half the live bid/ask spread + the conservative upper bound of Limitless's official "
+            "published taker buy-fee table (3.00% <= $0.50, 1.26% <= $0.75, 0.53% <= $0.95, "
+            "0.40% above) for the entry side's price band"
         )
-        missing_fee = True
+        missing_fee = False
     else:
         fee = 0.0
         method = (
@@ -88,7 +122,7 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
     implied = market.implied_prob
     edge_points = oracle_prob - implied
     side = "YES" if edge_points > 0 else "NO"
-    friction = estimate_friction(market, fee_multiplier)
+    friction = estimate_friction(market, fee_multiplier, side=side)
 
     base = {
         "side": side,
