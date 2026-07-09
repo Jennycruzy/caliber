@@ -15,13 +15,16 @@ from pathlib import Path
 from typing import Any
 
 from rwoo import edge
+from rwoo.coverage import classify_market_shape
 from rwoo.engines import economics, sports, weather
 from rwoo.readers import kalshi, limitless, polymarket
 from rwoo.weather_stations import STATIONS, station_for_series
 
 WEATHER_SERIES = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA", "KXHIGHDEN"]
 ECONOMICS_SERIES = ["KXCPICORE"]
-LIMITLESS_DEFAULT_LIMIT = 100
+KALSHI_ACTIVE_DEFAULT_LIMIT = 500
+POLYMARKET_DEFAULT_LIMIT = 500
+LIMITLESS_DEFAULT_LIMIT = 500
 WEATHER_TIMEZONES = {
     "KXHIGHNY": "America/New_York",
     "KXHIGHCHI": "America/Chicago",
@@ -37,6 +40,10 @@ class ScanRecord:
     market_id: str
     question: str
     domain: str
+    family: str
+    shape: str
+    coverage_status: str
+    missing: str | None
     implied_prob: float
     spread: float
     oracle_prob: float | None
@@ -83,6 +90,7 @@ def _market_fee_multiplier(market) -> float:
 
 
 def _record_from_result(market, engine_result: dict, qualified_edge: dict) -> ScanRecord:
+    coverage = classify_market_shape(market)
     friction = qualified_edge.get("friction") or {}
     edge_points = qualified_edge.get("edge_points")
     total_friction = friction.get("total_friction")
@@ -94,6 +102,10 @@ def _record_from_result(market, engine_result: dict, qualified_edge: dict) -> Sc
         market_id=market.market_id,
         question=market.question,
         domain=market.domain,
+        family=coverage.family,
+        shape=coverage.shape,
+        coverage_status=_coverage_status_from_edge(qualified_edge),
+        missing=None if qualified_edge.get("actionable") is True else _missing_from_edge(qualified_edge),
         implied_prob=market.implied_prob,
         spread=market.spread,
         oracle_prob=engine_result.get("oracle_prob"),
@@ -107,6 +119,53 @@ def _record_from_result(market, engine_result: dict, qualified_edge: dict) -> Sc
         net_edge_points=net_edge,
         reason=qualified_edge.get("reason", ""),
         method=engine_result.get("method", ""),
+        resolution_time=market.resolution_time,
+        fetched_at=market.fetched_at,
+    )
+
+
+def _coverage_status_from_edge(qualified_edge: dict) -> str:
+    if qualified_edge.get("actionable") is True:
+        return "actionable"
+    reason = str(qualified_edge.get("reason", "")).lower()
+    if "fee" in reason and "not quantified" in reason:
+        return "fee_missing"
+    return "wait"
+
+
+def _missing_from_edge(qualified_edge: dict) -> str | None:
+    reason = qualified_edge.get("reason")
+    return str(reason) if reason else None
+
+
+def _unsupported_record(market, reason: str) -> ScanRecord:
+    coverage = classify_market_shape(market)
+    friction = edge.estimate_friction(
+        market,
+        fee_multiplier=_market_fee_multiplier(market) if market.venue == "kalshi" else 1,
+    )
+    return ScanRecord(
+        venue=market.venue,
+        market_id=market.market_id,
+        question=market.question,
+        domain=market.domain,
+        family=coverage.family,
+        shape=coverage.shape,
+        coverage_status=coverage.status,
+        missing=coverage.reason,
+        implied_prob=market.implied_prob,
+        spread=market.spread,
+        oracle_prob=None,
+        prob_low=None,
+        prob_high=None,
+        confidence=None,
+        side=None,
+        actionable=False,
+        edge_points=None,
+        total_friction=friction.get("total_friction"),
+        net_edge_points=None,
+        reason=f"included but not actionable: {coverage.reason or reason}",
+        method=friction.get("method", ""),
         resolution_time=market.resolution_time,
         fetched_at=market.fetched_at,
     )
@@ -163,16 +222,10 @@ def evaluate_market(market) -> ScanRecord | None:
 
 
 def skip_reason(market) -> str:
+    coverage = classify_market_shape(market)
     if market.venue == "limitless":
-        if market.domain == "weather":
-            return "limitless_weather_not_yet_parseable"
-        if market.domain == "economics":
-            rule = market.resolution_rule.lower()
-            if "consumer price index for all urban consumers" in rule and "less food and energy" not in rule:
-                return "limitless_headline_cpi_not_supported_by_core_cpi_engine"
-            return "limitless_economics_shape_not_supported"
-        if market.domain == "sports":
-            return "limitless_sports_shape_not_supported"
+        if market.domain in {"weather", "economics", "sports"}:
+            return f"limitless_{coverage.family}_{coverage.shape}_{coverage.status}"
         return "limitless_other_domain_or_price_oracle_not_supported"
     if market.venue == "polymarket" and market.domain == "sports":
         return "polymarket_sports_not_world_cup_outright"
@@ -183,6 +236,10 @@ def skip_reason(market) -> str:
     return f"{market.venue}_{market.domain}_not_supported"
 
 
+def _should_include_unsupported(market) -> bool:
+    return market.domain in {"weather", "economics", "sports"}
+
+
 def _score_record(record: ScanRecord) -> tuple[int, float, float]:
     net = record.net_edge_points
     if net is None or math.isnan(net):
@@ -191,44 +248,70 @@ def _score_record(record: ScanRecord) -> tuple[int, float, float]:
     return (1 if record.actionable else 0, net, confidence)
 
 
+def _dedupe_markets(markets: list) -> list:
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for market in markets:
+        key = (market.venue, market.market_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(market)
+    return out
+
+
 def scan_opportunities(
     *,
     max_weather_markets_per_series: int = 20,
     max_economics_markets: int = 40,
-    polymarket_limit: int = 100,
+    kalshi_active_limit: int = KALSHI_ACTIVE_DEFAULT_LIMIT,
+    polymarket_limit: int = POLYMARKET_DEFAULT_LIMIT,
     limitless_limit: int = LIMITLESS_DEFAULT_LIMIT,
     include_limitless: bool = True,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     markets = []
 
+    markets.extend(kalshi.fetch_canonical_active_markets(max_markets=kalshi_active_limit))
     for series in WEATHER_SERIES:
         markets.extend(kalshi.fetch_canonical_markets_for_series(series, limit=max_weather_markets_per_series))
     for series in ECONOMICS_SERIES:
         markets.extend(kalshi.fetch_canonical_markets_for_series(series, limit=max_economics_markets))
-    markets.extend(polymarket.fetch_canonical_markets(limit=polymarket_limit, closed=False))
+    markets.extend(polymarket.fetch_canonical_active_markets(max_markets=polymarket_limit))
     if include_limitless:
         markets.extend(limitless.fetch_canonical_markets(active_limit=limitless_limit))
+    markets = _dedupe_markets(markets)
 
-    records = []
+    evaluated_records = []
+    included_unsupported = []
     skipped = 0
     skip_reasons: dict[str, int] = {}
+    included_unsupported_reasons: dict[str, int] = {}
     venue_counts: dict[str, int] = {}
     domain_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    coverage_status_counts: dict[str, int] = {}
     limitless_group_children_seen = 0
     errors = []
     for market in markets:
         _bump_counter(venue_counts, market.venue)
         _bump_counter(domain_counts, market.domain)
+        coverage = classify_market_shape(market)
+        _bump_counter(family_counts, coverage.family)
         if market.venue == "limitless" and market.raw.get("parent"):
             limitless_group_children_seen += 1
         try:
             record = evaluate_market(market)
             if record is None:
-                skipped += 1
-                _bump_counter(skip_reasons, skip_reason(market))
+                reason = skip_reason(market)
+                if _should_include_unsupported(market):
+                    included_unsupported.append(_unsupported_record(market, reason))
+                    _bump_counter(included_unsupported_reasons, reason)
+                else:
+                    skipped += 1
+                    _bump_counter(skip_reasons, reason)
             else:
-                records.append(record)
+                evaluated_records.append(record)
         except Exception as exc:  # noqa: BLE001
             errors.append(
                 {
@@ -239,21 +322,30 @@ def scan_opportunities(
                 }
             )
 
+    records = evaluated_records + included_unsupported
     ranked = sorted(records, key=_score_record, reverse=True)
     actionable = [record for record in ranked if record.actionable]
+    for record in records:
+        _bump_counter(coverage_status_counts, record.coverage_status)
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": started_at,
         "markets_seen": len(markets),
-        "markets_evaluated": len(records),
+        "markets_evaluated": len(evaluated_records),
+        "markets_included": len(records),
+        "markets_included_unsupported": len(included_unsupported),
         "markets_skipped": skipped,
         "venue_counts": venue_counts,
         "domain_counts": domain_counts,
+        "family_counts": family_counts,
+        "coverage_status_counts": coverage_status_counts,
         "skip_reasons": skip_reasons,
+        "included_unsupported_reasons": included_unsupported_reasons,
         "limitless_group_children_seen": limitless_group_children_seen,
         "errors": errors,
         "actionable_count": len(actionable),
         "top": [asdict(record) for record in ranked],
+        "included_unsupported": [asdict(record) for record in included_unsupported],
         "action_rule": "YES if price < prob_low - costs; NO if price > prob_high + costs; otherwise no trade",
     }
 
@@ -265,15 +357,17 @@ def render_markdown(scan: dict[str, Any], limit: int = 20) -> str:
         f"- Created: {scan['created_at']}",
         f"- Markets seen: {scan['markets_seen']}",
         f"- Markets evaluated: {scan['markets_evaluated']}",
+        f"- Markets included: {scan.get('markets_included', len(scan['top']))}",
+        f"- Included unsupported: {scan.get('markets_included_unsupported', 0)}",
         f"- Markets skipped: {scan['markets_skipped']}",
         f"- Actionable: {scan['actionable_count']}",
         f"- Rule: {scan['action_rule']}",
         "",
-        "| Rank | Action | Venue | Market | Side | Oracle | Market | Net edge | Cost | Reason |",
-        "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| Rank | Status | Venue | Family | Market | Side | Oracle | Market | Net edge | Cost | Reason |",
+        "| ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for idx, record in enumerate(scan["top"][:limit], start=1):
-        action = "TRADE" if record["actionable"] else "WAIT"
+        action = record.get("coverage_status") or ("actionable" if record["actionable"] else "wait")
         oracle = _fmt_prob(record["oracle_prob"])
         implied = _fmt_prob(record["implied_prob"])
         net = _fmt_prob(record["net_edge_points"])
@@ -281,9 +375,29 @@ def render_markdown(scan: dict[str, Any], limit: int = 20) -> str:
         question = record["question"].replace("|", " ")
         reason = record["reason"].replace("|", " ")
         lines.append(
-            f"| {idx} | {action} | {record['venue']} | {question} | {record['side'] or ''} | "
+            f"| {idx} | {action} | {record['venue']} | {record.get('family', '')} | {question} | {record['side'] or ''} | "
             f"{oracle} | {implied} | {net} | {cost} | {reason} |"
         )
+    if scan.get("included_unsupported_reasons"):
+        lines.extend(["", "## Included Unsupported", ""])
+        for reason, count in sorted(
+            scan["included_unsupported_reasons"].items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:12]:
+            lines.append(f"- {reason}: {count}")
+        lines.extend([
+            "",
+            "| Venue | Domain | Family | Shape | Market | Reason |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ])
+        for record in scan.get("included_unsupported", [])[:20]:
+            question = record["question"].replace("|", " ")
+            reason = record["reason"].replace("|", " ")
+            lines.append(
+                f"| {record['venue']} | {record['domain']} | {record.get('family', '')} | "
+                f"{record.get('shape', '')} | {question} | {reason} |"
+            )
     if scan.get("skip_reasons"):
         lines.extend(["", "## Skip Reasons", ""])
         for reason, count in sorted(scan["skip_reasons"].items(), key=lambda item: item[1], reverse=True)[:12]:
@@ -320,7 +434,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Scan live markets for cost-adjusted deterministic edges")
     parser.add_argument("--weather-limit", type=int, default=20)
     parser.add_argument("--economics-limit", type=int, default=40)
-    parser.add_argument("--polymarket-limit", type=int, default=100)
+    parser.add_argument("--kalshi-active-limit", type=int, default=KALSHI_ACTIVE_DEFAULT_LIMIT)
+    parser.add_argument("--polymarket-limit", type=int, default=POLYMARKET_DEFAULT_LIMIT)
     parser.add_argument("--limitless-limit", type=int, default=LIMITLESS_DEFAULT_LIMIT)
     parser.add_argument("--no-limitless", action="store_true", help="skip Limitless read-only market scan")
     parser.add_argument("--top", type=int, default=20)
@@ -331,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     scan = scan_opportunities(
         max_weather_markets_per_series=args.weather_limit,
         max_economics_markets=args.economics_limit,
+        kalshi_active_limit=args.kalshi_active_limit,
         polymarket_limit=args.polymarket_limit,
         limitless_limit=args.limitless_limit,
         include_limitless=not args.no_limitless,

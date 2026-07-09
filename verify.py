@@ -1727,8 +1727,9 @@ def phase_8():
             scan = scanner.scan_opportunities(
                 max_weather_markets_per_series=12,
                 max_economics_markets=12,
-                polymarket_limit=80,
-                limitless_limit=80,
+                kalshi_active_limit=120,
+                polymarket_limit=120,
+                limitless_limit=120,
             )
             scanner.write_scan_artifacts(
                 scan,
@@ -1742,10 +1743,15 @@ def phase_8():
         show_json("Opportunity scan summary", {
             "markets_seen": scan["markets_seen"],
             "markets_evaluated": scan["markets_evaluated"],
+            "markets_included": scan.get("markets_included"),
+            "markets_included_unsupported": scan.get("markets_included_unsupported"),
             "markets_skipped": scan["markets_skipped"],
             "venue_counts": scan.get("venue_counts"),
             "domain_counts": scan.get("domain_counts"),
+            "family_counts": scan.get("family_counts"),
+            "coverage_status_counts": scan.get("coverage_status_counts"),
             "skip_reasons": scan.get("skip_reasons"),
+            "included_unsupported_reasons": scan.get("included_unsupported_reasons"),
             "limitless_group_children_seen": scan.get("limitless_group_children_seen"),
             "actionable_count": scan["actionable_count"],
             "errors": scan["errors"][:5],
@@ -1760,20 +1766,39 @@ def phase_8():
     breadth_ok = scan is not None and scan["markets_seen"] >= 80 and scan["markets_evaluated"] >= 25
     costs_ok = bool(records) and all(record.get("total_friction") is not None for record in records)
     ranking_ok = bool(records) and all("reason" in record and "actionable" in record for record in records)
+    coverage_fields_ok = bool(records) and all(
+        record.get("coverage_status") and record.get("family") and record.get("shape")
+        for record in records
+    )
     item_error_rate = (len(scan["errors"]) / scan["markets_seen"]) if scan and scan["markets_seen"] else 1.0
     scanner_resilience_ok = scan is not None and item_error_rate <= 0.05 and len(failures) == 0
     venue_counts = scan.get("venue_counts", {}) if scan else {}
     skip_reasons = scan.get("skip_reasons", {}) if scan else {}
+    included_unsupported_reasons = scan.get("included_unsupported_reasons", {}) if scan else {}
     limitless_records = [record for record in records if record.get("venue") == "limitless"]
     limitless_seen_ok = venue_counts.get("limitless", 0) >= 1
     limitless_group_ok = scan is not None and scan.get("limitless_group_children_seen", 0) >= 1
-    limitless_fee_ok = bool(limitless_records) and all(
-        "fee" in (record.get("reason") or record.get("method") or "").lower()
-        for record in limitless_records
+    priced_limitless_records = [
+        record for record in limitless_records
+        if record.get("oracle_prob") is not None
+    ]
+    limitless_fee_ok = bool(priced_limitless_records) and all(
+        record.get("coverage_status") == "fee_missing"
+        for record in priced_limitless_records
     )
     limitless_no_actionable_ok = all(not record.get("actionable") for record in limitless_records)
-    unsupported_skipped_ok = bool(skip_reasons) and any(
-        reason.startswith("limitless_") for reason in skip_reasons
+    unsupported_included_ok = bool(included_unsupported_reasons) and any(
+        reason.startswith("limitless_") for reason in included_unsupported_reasons
+    )
+    domain_records_included_ok = bool(records) and any(
+        record.get("venue") == "limitless"
+        and record.get("domain") in {"economics", "sports", "weather"}
+        and str(record.get("reason", "")).startswith("included but not actionable")
+        for record in records
+    )
+    coverage_states_ok = scan is not None and any(
+        status in scan.get("coverage_status_counts", {})
+        for status in {"model_missing", "parse_missing", "source_missing", "fee_missing"}
     )
 
     hdr("GATE 8 — ACCEPTANCE CRITERIA")
@@ -1782,9 +1807,10 @@ def phase_8():
         "Scanner evaluated supported markets with deterministic engines": scan is not None and scan["markets_evaluated"] >= 25,
         "Every evaluated record includes real cost/friction": costs_ok,
         "Scanner ranks records with action/no-action reasons": ranking_ok,
+        "Scanner emits explicit coverage family/shape/status fields": coverage_fields_ok and coverage_states_ok,
         "Limitless live API was read as a venue": limitless_seen_ok,
         "Limitless grouped markets were flattened into child markets": limitless_group_ok,
-        "Unsupported Limitless shapes were counted as skips": unsupported_skipped_ok,
+        "Unsupported Limitless domain shapes were included as non-actionable records": unsupported_included_ok and domain_records_included_ok,
         "Limitless fee gap prevents actionable status": limitless_fee_ok and limitless_no_actionable_ok,
         "Scanner artifacts can be written": artifacts_ok,
         "Scanner completed with <=5% item-level source errors": scanner_resilience_ok,

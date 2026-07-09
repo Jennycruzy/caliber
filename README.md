@@ -39,7 +39,10 @@ the weather engine, edge computation with its reproducibility proof, the
 restraint layer, economics/sports engines, no-lookahead calibration,
 tamper-evident receipts with a real corrected X Layer mainnet anchor,
 receipt-backed daily proof loop, and a ranked cost-aware scan across live
-markets).
+markets). The scanner now keeps a broad market inventory across venues and
+records a coverage state for every included weather/economics/sports market:
+`actionable`, `wait`, `model_missing`, `parse_missing`, `source_missing`, or
+`fee_missing`.
 
 The calibration backtest code keeps full/no-cap paths, but the human-readable
 gate uses explicit runtime controls where live APIs are slow or quota-limited:
@@ -62,13 +65,14 @@ gate uses explicit runtime controls where live APIs are slow or quota-limited:
   engine now blends World Football Elo with the official FIFA/Coca-Cola Men's
   World Ranking and includes deterministic 48-team tournament simulators for
   both source families.
-- **Opportunity scanning** pulls batches from live Kalshi and Polymarket
-  markets, runs the supported deterministic engines, applies uncertainty and
-  real trading-friction checks, ranks actionable candidates, and emits
-  JSON/Markdown artifacts under `data/public/`. Limitless is included as a
-  read-only scanned venue: unsupported categories are counted as skips, and
-  no Limitless market is marked actionable until exact venue fees/execution
-  semantics are wired.
+- **Opportunity scanning** pulls broad live batches from Kalshi, Polymarket,
+  and Limitless, runs the supported deterministic engines, applies uncertainty
+  and real trading-friction checks, ranks actionable candidates, and emits
+  JSON/Markdown artifacts under `data/public/`. Weather/economics/sports
+  markets without a matching engine are still included as explicit
+  non-actionable records with family/shape/status fields. Unrelated
+  `other`/price-oracle noise remains skipped. No Limitless market is marked
+  actionable until exact venue fees/execution semantics are wired.
 
 ## Reproduce every claim
 
@@ -101,6 +105,8 @@ or a canned pass.
 - `src/rwoo/` — the engine, built out phase by phase:
   - `models.py` — the canonical market object.
   - `domain.py` — deterministic weather/economics/sports/other routing.
+  - `coverage.py` — deterministic family/shape/status coverage registry for
+    included markets.
   - `readers/kalshi.py`, `readers/polymarket.py`, `readers/limitless.py` —
     Stage 1 market readers. Limitless flattens grouped markets but remains
     read-only.
@@ -138,8 +144,9 @@ or a canned pass.
     artifact generation.
   - `scanner.py` — live opportunity scanner that ranks cost-adjusted
     actionable candidates and writes `data/public/opportunity_scan_latest.*`.
-    It now reports venue/domain counts and skip reasons so read-only
-    Limitless coverage does not masquerade as trade support.
+    It now reports venue/domain/family/status counts, included unsupported
+    domain records, and skip reasons so market visibility does not masquerade
+    as trade support.
   - `xlayer.py` — X Layer RPC verification and on-chain anchor verification
     (decodes the ERC-4337 `UserOperationEvent` to confirm the inner call
     actually succeeded — an outer bundler-transaction receipt status alone is

@@ -14,7 +14,10 @@ a real Brier score, sports includes multi-source deterministic tournament
 simulators, primary-source checks are wired, the daily proof loop produces
 receipt-backed artifacts, and Phase 8 scans live markets for cost-adjusted
 opportunities. Limitless has been added to the scanner as a read-only venue,
-with grouped markets flattened and unsupported shapes counted explicitly.
+with grouped markets flattened and unsupported weather/economics/sports shapes
+included explicitly as non-actionable records. The scanner now also reads
+broad active batches from Kalshi and paginated Polymarket batches instead of
+only the original hand-picked weather/CPI/World Cup paths.
 Only after these gates pass should OKX.AI listing/service registration/payment
 work resume.
 
@@ -157,10 +160,13 @@ Completion criteria:
 Current status: not built.
 
 What exists: `src/rwoo/scanner.py` finds and ranks actionable cost-adjusted
-candidates from live Kalshi/Polymarket markets and read-only Limitless market
-data. It writes JSON/Markdown artifacts and Phase 8 proves the scanner runs.
-Limitless grouped markets are flattened, broad economics/sports/other markets
-are classified, and unsupported Limitless shapes are counted as skips.
+candidates from broad live Kalshi/Polymarket markets and read-only Limitless
+market data. It writes JSON/Markdown artifacts and Phase 8 proves the scanner
+runs. `src/rwoo/coverage.py` assigns every included market a family, shape,
+and coverage status (`actionable`, `wait`, `model_missing`, `parse_missing`,
+`source_missing`, `fee_missing`, or `unsupported_domain`). Unsupported
+weather/economics/sports shapes are included as non-actionable records instead
+of disappearing into skip counts.
 
 Why incomplete: no exchange credential flow, wallet approval flow, order
 placement API, max-size/risk-limit policy, or post-trade receipt is wired.
@@ -183,9 +189,9 @@ What exists: `src/rwoo/readers/limitless.py` reads public active/search/detail
 market data, flattens grouped markets, maps `tradePrices` to bid/ask-like
 spread, records collateral/fee metadata in `raw`, and classifies Limitless
 markets into weather/economics/sports/other. Phase 8 now checks that Limitless
-was read live, grouped children were flattened, unsupported shapes were
-skipped, and no Limitless record is actionable while the exact fee term is not
-computed.
+was read live, grouped children were flattened, unsupported domain shapes were
+included as non-actionable records, and no Limitless record is actionable
+while the exact fee term is not computed.
 
 Known support boundary:
 
@@ -196,11 +202,13 @@ Known support boundary:
   `engines/weather.py`.
 - Economics Limitless markets exist, including headline CPI, GDP, recession,
   and Fed-rate shapes. The current engine supports core CPI, not headline CPI
-  or GDP/Fed/recession markets, so those are classified and skipped.
+  or GDP/Fed/recession markets, so those are included with non-actionable
+  reasons until the matching engines exist.
 - Sports Limitless markets are broad. The current supported sports engine is
   2026 FIFA World Cup national-team outright winner only. NBA/NHL/EPL/tennis,
   esports, props, stages, exact matchups, and player-stat markets need their
-  own deterministic source/model paths before they can be actionable.
+  own deterministic source/model paths before they can be actionable, but they
+  are still included in the scan inventory.
 
 Completion criteria:
 
@@ -209,6 +217,38 @@ Completion criteria:
 - Add exact Limitless fee calculation from official fee/profile/order rules.
 - Add new deterministic economics/sports engines before widening Limitless
   actionable support beyond core-compatible CPI and World Cup outright shapes.
+
+### Broad venue coverage and engine expansion
+
+Current status: inventory layer started; many engines still missing.
+
+What exists: broad market ingestion is now the scanner's default direction.
+Kalshi active markets are cursor-paginated, Polymarket Gamma markets are
+offset-paginated, and Limitless active/search markets are flattened. Domain
+markets are included with explicit family/shape/status metadata even when no
+probability engine exists.
+
+Known gap: broad inclusion is not the same as broad pricing. The next engine
+work should be added family by family, with verification per family:
+
+- Weather: parse any venue's location/date/metric/strike into the existing
+  weather engine before widening sports. Fixing weather coverage remains the
+  priority whenever a real weather market is available.
+- Economics: headline CPI monthly/annual, GDP, Fed-rate path/decision,
+  recession, PPI, and labor markets each need source-backed engines.
+- Sports: tennis match/tournament, NBA/NHL futures, soccer club outrights,
+  esports, World Cup stages/props, and player props each need their own source
+  and model path.
+
+Completion criteria:
+
+- Add a Phase 9 coverage gate proving broad ingestion across all venues.
+- Require every weather/economics/sports market to be included or produce a
+  structured item-level error.
+- Require every included domain market to carry family, shape, coverage status,
+  and missing capability text when not priced.
+- Add at least one new engine family per phase, starting with weather when a
+  parseable market is present, then headline CPI/GDP/Fed.
 
 ### Public calibration page
 

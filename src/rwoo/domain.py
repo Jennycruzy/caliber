@@ -6,6 +6,7 @@ Deterministic-Core Law either way, but it is kept rule-based for the same
 reason everything else is: reproducibility. Given the same market object,
 this function always returns the same domain.
 """
+import re
 
 # Kalshi exposes an explicit, clean category string per event/series.
 # Verified live 2026-07-08 (docs/VERIFICATION_LEDGER.md) against
@@ -70,7 +71,7 @@ def classify_limitless(categories: list[str], tags: list[str], question: str, de
     }:
         return "sports"
 
-    if labels & {"weather", "climate"} or any(kw in text for kw in _WEATHER_KEYWORDS):
+    if labels & {"weather", "climate"} or _contains_any_keyword(text, _WEATHER_KEYWORDS):
         return "weather"
 
     # Limitless has many crypto/equity/commodity Up/Down markets. Those are
@@ -82,7 +83,7 @@ def classify_limitless(categories: list[str], tags: list[str], question: str, de
         or "consumer price index" in text
         or "producer price index" in text
         or "gross domestic product" in text
-        or any(kw in text for kw in _ECON_KEYWORDS)
+        or _contains_any_keyword(text, _ECON_KEYWORDS)
     ):
         return "economics"
 
@@ -108,10 +109,21 @@ def classify_limitless(categories: list[str], tags: list[str], question: str, de
 
 def _classify_by_keywords(question: str) -> str:
     q = question.lower()
-    if any(kw in q for kw in _WEATHER_KEYWORDS):
+    if _contains_any_keyword(q, _WEATHER_KEYWORDS):
         return "weather"
-    if any(kw in q for kw in _ECON_KEYWORDS):
+    if _contains_any_keyword(q, _ECON_KEYWORDS):
         return "economics"
-    if any(kw in q for kw in _SPORTS_KEYWORDS):
+    if _contains_any_keyword(q, _SPORTS_KEYWORDS):
         return "sports"
     return "other"
+
+
+def _contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    for keyword in keywords:
+        kw = keyword.strip().lower()
+        if " " in kw or not kw.isalnum():
+            if kw in text:
+                return True
+        elif re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", text):
+            return True
+    return False

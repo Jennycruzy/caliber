@@ -19,13 +19,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def fetch_markets(limit: int = 5, closed: bool = False, client: httpx.Client | None = None) -> list[dict]:
+def fetch_markets(
+    limit: int = 5,
+    closed: bool = False,
+    offset: int = 0,
+    client: httpx.Client | None = None,
+) -> list[dict]:
     own_client = client is None
     client = client or httpx.Client(timeout=15)
     try:
         resp = client.get(
             f"{GAMMA_BASE_URL}/markets",
-            params={"limit": limit, "closed": str(closed).lower()},
+            params={"limit": limit, "closed": str(closed).lower(), "offset": offset},
         )
         resp.raise_for_status()
         return resp.json()
@@ -77,5 +82,21 @@ def to_canonical(market: dict) -> CanonicalMarket:
     )
 
 
-def fetch_canonical_markets(limit: int = 5, closed: bool = False) -> list[CanonicalMarket]:
-    return [to_canonical(m) for m in fetch_markets(limit=limit, closed=closed)]
+def fetch_canonical_markets(limit: int = 5, closed: bool = False, offset: int = 0) -> list[CanonicalMarket]:
+    return [to_canonical(m) for m in fetch_markets(limit=limit, closed=closed, offset=offset)]
+
+
+def fetch_canonical_active_markets(max_markets: int = 500, page_size: int = 100) -> list[CanonicalMarket]:
+    out: list[CanonicalMarket] = []
+    offset = 0
+    with httpx.Client(timeout=20) as client:
+        while len(out) < max_markets:
+            batch_size = min(page_size, max_markets - len(out))
+            batch = fetch_markets(limit=batch_size, closed=False, offset=offset, client=client)
+            if not batch:
+                break
+            out.extend(to_canonical(m) for m in batch)
+            offset += len(batch)
+            if len(batch) < batch_size:
+                break
+    return out

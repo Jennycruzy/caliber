@@ -65,6 +65,41 @@ def fetch_markets(series_ticker: str, limit: int = 100, client: httpx.Client | N
             client.close()
 
 
+def fetch_active_markets(
+    *,
+    max_markets: int = 500,
+    page_limit: int = 200,
+    status: str = "open",
+    client: httpx.Client | None = None,
+) -> list[dict]:
+    own_client = client is None
+    client = client or httpx.Client(timeout=20)
+    markets: list[dict] = []
+    cursor: str | None = None
+    try:
+        while len(markets) < max_markets:
+            params: dict[str, object] = {
+                "limit": min(page_limit, max_markets - len(markets)),
+                "status": status,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            resp = client.get(f"{BASE_URL}/markets", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            batch = data.get("markets", [])
+            if not batch:
+                break
+            markets.extend(batch)
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        return markets
+    finally:
+        if own_client:
+            client.close()
+
+
 def _series_category(series_ticker: str) -> str | None:
     if series_ticker.startswith(("KXHIGH", "KXLOW")):
         return "Climate and Weather"
@@ -140,3 +175,7 @@ def fetch_canonical_markets_for_series(
     client: httpx.Client | None = None,
 ) -> list[CanonicalMarket]:
     return [market_row_to_canonical(m) for m in fetch_markets(series_ticker, limit=limit, client=client)]
+
+
+def fetch_canonical_active_markets(max_markets: int = 500) -> list[CanonicalMarket]:
+    return [market_row_to_canonical(m) for m in fetch_active_markets(max_markets=max_markets)]
