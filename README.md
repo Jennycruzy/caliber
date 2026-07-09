@@ -65,7 +65,10 @@ gate uses explicit runtime controls where live APIs are slow or quota-limited:
 - **Opportunity scanning** pulls batches from live Kalshi and Polymarket
   markets, runs the supported deterministic engines, applies uncertainty and
   real trading-friction checks, ranks actionable candidates, and emits
-  JSON/Markdown artifacts under `data/public/`.
+  JSON/Markdown artifacts under `data/public/`. Limitless is included as a
+  read-only scanned venue: unsupported categories are counted as skips, and
+  no Limitless market is marked actionable until exact venue fees/execution
+  semantics are wired.
 
 ## Reproduce every claim
 
@@ -98,7 +101,9 @@ or a canned pass.
 - `src/rwoo/` — the engine, built out phase by phase:
   - `models.py` — the canonical market object.
   - `domain.py` — deterministic weather/economics/sports/other routing.
-  - `readers/kalshi.py`, `readers/polymarket.py` — Stage 1 market readers.
+  - `readers/kalshi.py`, `readers/polymarket.py`, `readers/limitless.py` —
+    Stage 1 market readers. Limitless flattens grouped markets but remains
+    read-only.
   - `weather_stations.py` — verified station registry (Kalshi series -> lat/lon).
   - `engines/weather.py` — Stage 2 weather engine: multi-model ensemble
     consensus + confidence, plus a NASA POWER historical base rate. No LLM
@@ -112,7 +117,9 @@ or a canned pass.
   - `edge.py` — Stage 3: edge = oracle_prob - implied_prob, qualified against
     the oracle's own uncertainty band, source freshness, source/model agreement,
     and real trading friction (Kalshi's published fee formula + the live
-    spread). Refuses non-actionable edges.
+    spread). Limitless spread is measured from public orderbook-like fields,
+    but actionable status is refused until exact fee calculation is integrated.
+    Refuses non-actionable edges.
   - `calibration.py` — Brier score, reliability buckets, and transparent
     recalibration utilities.
   - `backtests/weather.py` — no-cap weather calibration backtest across all
@@ -131,6 +138,8 @@ or a canned pass.
     artifact generation.
   - `scanner.py` — live opportunity scanner that ranks cost-adjusted
     actionable candidates and writes `data/public/opportunity_scan_latest.*`.
+    It now reports venue/domain counts and skip reasons so read-only
+    Limitless coverage does not masquerade as trade support.
   - `xlayer.py` — X Layer RPC verification and on-chain anchor verification
     (decodes the ERC-4337 `UserOperationEvent` to confirm the inner call
     actually succeeded — an outer bundler-transaction receipt status alone is

@@ -53,6 +53,59 @@ def classify_polymarket(tag_labels: list[str], question: str) -> str:
     return _classify_by_keywords(question)
 
 
+def classify_limitless(categories: list[str], tags: list[str], question: str, description: str = "") -> str:
+    labels = {str(item).lower() for item in categories + tags}
+    text = f"{question} {description}".lower()
+
+    if labels & {
+        "sports",
+        "football",
+        "soccer",
+        "nba",
+        "nfl",
+        "mlb",
+        "nhl",
+        "tennis",
+        "esports",
+    }:
+        return "sports"
+
+    if labels & {"weather", "climate"} or any(kw in text for kw in _WEATHER_KEYWORDS):
+        return "weather"
+
+    # Limitless has many crypto/equity/commodity Up/Down markets. Those are
+    # deliberately not routed into the economics engine unless the rule text
+    # itself is macroeconomic.
+    if (
+        labels & {"economy", "economics"}
+        or "inflation" in text
+        or "consumer price index" in text
+        or "producer price index" in text
+        or "gross domestic product" in text
+        or any(kw in text for kw in _ECON_KEYWORDS)
+    ):
+        return "economics"
+
+    # Avoid treating price-oracle events as macro markets just because they
+    # mention oil, gold, equities, or crypto. A future price-source engine can
+    # opt these in explicitly.
+    if labels & {
+        "crypto",
+        "bitcoin",
+        "ethereum",
+        "daily",
+        "hourly",
+        "minutely",
+        "5 min",
+        "15 min",
+        "indexes",
+        "weekly",
+    }:
+        return "other"
+
+    return _classify_by_keywords(question)
+
+
 def _classify_by_keywords(question: str) -> str:
     q = question.lower()
     if any(kw in q for kw in _WEATHER_KEYWORDS):

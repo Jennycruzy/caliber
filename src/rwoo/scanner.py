@@ -16,11 +16,12 @@ from typing import Any
 
 from rwoo import edge
 from rwoo.engines import economics, sports, weather
-from rwoo.readers import kalshi, polymarket
+from rwoo.readers import kalshi, limitless, polymarket
 from rwoo.weather_stations import STATIONS, station_for_series
 
 WEATHER_SERIES = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA", "KXHIGHDEN"]
 ECONOMICS_SERIES = ["KXCPICORE"]
+LIMITLESS_DEFAULT_LIMIT = 100
 WEATHER_TIMEZONES = {
     "KXHIGHNY": "America/New_York",
     "KXHIGHCHI": "America/Chicago",
@@ -51,6 +52,10 @@ class ScanRecord:
     method: str
     resolution_time: str | None
     fetched_at: str
+
+
+def _bump_counter(counter: dict[str, int], key: str) -> None:
+    counter[key] = counter.get(key, 0) + 1
 
 
 def _month_from_event_ticker(event_ticker: str) -> int | None:
@@ -142,6 +147,10 @@ def evaluate_market(market) -> ScanRecord | None:
         if not market.question.endswith("win the 2026 FIFA World Cup?"):
             return None
         engine_result = sports.compute_world_cup_probability(market.question)
+    elif market.venue == "limitless" and market.domain == "sports":
+        if market.raw.get("limitless_supported_shape") != "world_cup_winner":
+            return None
+        engine_result = sports.compute_world_cup_probability(market.question)
     else:
         return None
 
@@ -151,6 +160,27 @@ def evaluate_market(market) -> ScanRecord | None:
         fee_multiplier=_market_fee_multiplier(market) if market.venue == "kalshi" else 1,
     )
     return _record_from_result(market, engine_result, qualified_edge)
+
+
+def skip_reason(market) -> str:
+    if market.venue == "limitless":
+        if market.domain == "weather":
+            return "limitless_weather_not_yet_parseable"
+        if market.domain == "economics":
+            rule = market.resolution_rule.lower()
+            if "consumer price index for all urban consumers" in rule and "less food and energy" not in rule:
+                return "limitless_headline_cpi_not_supported_by_core_cpi_engine"
+            return "limitless_economics_shape_not_supported"
+        if market.domain == "sports":
+            return "limitless_sports_shape_not_supported"
+        return "limitless_other_domain_or_price_oracle_not_supported"
+    if market.venue == "polymarket" and market.domain == "sports":
+        return "polymarket_sports_not_world_cup_outright"
+    if market.venue == "kalshi" and market.domain == "weather":
+        return "kalshi_weather_missing_station_or_strike"
+    if market.venue == "kalshi" and market.domain == "economics":
+        return "kalshi_economics_not_core_cpi_strike"
+    return f"{market.venue}_{market.domain}_not_supported"
 
 
 def _score_record(record: ScanRecord) -> tuple[int, float, float]:
@@ -166,6 +196,8 @@ def scan_opportunities(
     max_weather_markets_per_series: int = 20,
     max_economics_markets: int = 40,
     polymarket_limit: int = 100,
+    limitless_limit: int = LIMITLESS_DEFAULT_LIMIT,
+    include_limitless: bool = True,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
     markets = []
@@ -175,15 +207,26 @@ def scan_opportunities(
     for series in ECONOMICS_SERIES:
         markets.extend(kalshi.fetch_canonical_markets_for_series(series, limit=max_economics_markets))
     markets.extend(polymarket.fetch_canonical_markets(limit=polymarket_limit, closed=False))
+    if include_limitless:
+        markets.extend(limitless.fetch_canonical_markets(active_limit=limitless_limit))
 
     records = []
     skipped = 0
+    skip_reasons: dict[str, int] = {}
+    venue_counts: dict[str, int] = {}
+    domain_counts: dict[str, int] = {}
+    limitless_group_children_seen = 0
     errors = []
     for market in markets:
+        _bump_counter(venue_counts, market.venue)
+        _bump_counter(domain_counts, market.domain)
+        if market.venue == "limitless" and market.raw.get("parent"):
+            limitless_group_children_seen += 1
         try:
             record = evaluate_market(market)
             if record is None:
                 skipped += 1
+                _bump_counter(skip_reasons, skip_reason(market))
             else:
                 records.append(record)
         except Exception as exc:  # noqa: BLE001
@@ -204,6 +247,10 @@ def scan_opportunities(
         "markets_seen": len(markets),
         "markets_evaluated": len(records),
         "markets_skipped": skipped,
+        "venue_counts": venue_counts,
+        "domain_counts": domain_counts,
+        "skip_reasons": skip_reasons,
+        "limitless_group_children_seen": limitless_group_children_seen,
         "errors": errors,
         "actionable_count": len(actionable),
         "top": [asdict(record) for record in ranked],
@@ -218,6 +265,7 @@ def render_markdown(scan: dict[str, Any], limit: int = 20) -> str:
         f"- Created: {scan['created_at']}",
         f"- Markets seen: {scan['markets_seen']}",
         f"- Markets evaluated: {scan['markets_evaluated']}",
+        f"- Markets skipped: {scan['markets_skipped']}",
         f"- Actionable: {scan['actionable_count']}",
         f"- Rule: {scan['action_rule']}",
         "",
@@ -236,6 +284,10 @@ def render_markdown(scan: dict[str, Any], limit: int = 20) -> str:
             f"| {idx} | {action} | {record['venue']} | {question} | {record['side'] or ''} | "
             f"{oracle} | {implied} | {net} | {cost} | {reason} |"
         )
+    if scan.get("skip_reasons"):
+        lines.extend(["", "## Skip Reasons", ""])
+        for reason, count in sorted(scan["skip_reasons"].items(), key=lambda item: item[1], reverse=True)[:12]:
+            lines.append(f"- {reason}: {count}")
     if scan["errors"]:
         lines.extend(["", "## Errors", ""])
         for err in scan["errors"][:10]:
@@ -269,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--weather-limit", type=int, default=20)
     parser.add_argument("--economics-limit", type=int, default=40)
     parser.add_argument("--polymarket-limit", type=int, default=100)
+    parser.add_argument("--limitless-limit", type=int, default=LIMITLESS_DEFAULT_LIMIT)
+    parser.add_argument("--no-limitless", action="store_true", help="skip Limitless read-only market scan")
     parser.add_argument("--top", type=int, default=20)
     parser.add_argument("--write", action="store_true", help="write JSON/Markdown artifacts under data/public")
     parser.add_argument("--json", action="store_true", help="print raw JSON instead of markdown")
@@ -278,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         max_weather_markets_per_series=args.weather_limit,
         max_economics_markets=args.economics_limit,
         polymarket_limit=args.polymarket_limit,
+        limitless_limit=args.limitless_limit,
+        include_limitless=not args.no_limitless,
     )
     if args.write:
         write_scan_artifacts(scan)

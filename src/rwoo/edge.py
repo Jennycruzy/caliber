@@ -18,6 +18,11 @@ Constants used here are cited, not invented:
   - Polymarket's fee schedule has not been verified at all. Friction there
     uses the real quoted spread only; the missing fee term is a stated gap,
     not a guessed number standing in for real data.
+  - Limitless exposes live bid/ask-like `tradePrices` fields and official docs
+    state CLOB taker-fee ranges, but this build has not wired the exact
+    per-order/profile fee calculation. Limitless records therefore use
+    spread-only friction and are refused as actionable until that fee term is
+    computed exactly.
 """
 from datetime import datetime, timezone
 
@@ -36,17 +41,28 @@ def estimate_friction(market, fee_multiplier: float = 1.0) -> dict:
     if market.venue == "kalshi":
         fee = kalshi_taker_fee(market.implied_prob, fee_multiplier)
         method = "half the live bid/ask spread + Kalshi's published taker fee (0.07 * P * (1-P))"
+        missing_fee = False
+    elif market.venue == "limitless":
+        fee = 0.0
+        method = (
+            "half the live bid/ask spread from Limitless tradePrices only — official Limitless docs "
+            "state dynamic CLOB taker-fee ranges, but this build has not computed the exact "
+            "per-order/profile fee, so actionable trading is refused"
+        )
+        missing_fee = True
     else:
         fee = 0.0
         method = (
             f"half the live bid/ask spread only — {market.venue}'s fee schedule is not yet "
             "verified (a disclosed gap, not a guessed fee)"
         )
+        missing_fee = False
     return {
         "half_spread": half_spread,
         "fee": fee,
         "total_friction": half_spread + fee,
         "method": method,
+        "missing_fee": missing_fee,
     }
 
 
@@ -81,6 +97,16 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
         "uncertainty_band": [prob_low, prob_high] if prob_low is not None else None,
         "friction": friction,
     }
+
+    if friction.get("missing_fee"):
+        return {
+            **base,
+            "actionable": False,
+            "reason": (
+                "venue fee is not quantified — spread was measured, but the fee term is still "
+                "unverified so this read-only venue cannot produce an actionable edge yet"
+            ),
+        }
 
     # Check 1 — is the market still forecastable, i.e. has resolution already passed?
     if market.resolution_time:

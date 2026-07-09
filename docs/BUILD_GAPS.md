@@ -1,6 +1,6 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-08
+Last updated: 2026-07-09
 
 This file records incomplete work that must not be forgotten between phases.
 It is intentionally blunt: if a component is not complete, it stays listed
@@ -13,7 +13,8 @@ Phase 6, pre-listing hardening, and the live opportunity scanner are now
 a real Brier score, sports includes multi-source deterministic tournament
 simulators, primary-source checks are wired, the daily proof loop produces
 receipt-backed artifacts, and Phase 8 scans live markets for cost-adjusted
-opportunities.
+opportunities. Limitless has been added to the scanner as a read-only venue,
+with grouped markets flattened and unsupported shapes counted explicitly.
 Only after these gates pass should OKX.AI listing/service registration/payment
 work resume.
 
@@ -22,7 +23,7 @@ Recommended order (updated):
 1. ~~Before Phase 6, clean up quick primary-source verification gaps~~ — done.
 2. ~~Phase 6: receipts, append-only ledger, tamper evidence, X Layer anchoring~~ — done, including a corrected anchor after catching a false positive in the verifier (see docs/VERIFICATION_LEDGER.md §16.1).
 3. ~~Pre-listing hardening: economics, sports, primary sources, daily proof loop~~ — done; `python3 verify.py --phase 7` passes.
-4. ~~Live opportunity scanner: broad cost-aware scan across supported markets~~ — done; `python3 verify.py --phase 8` passes and `data/public/opportunity_scan_latest.*` is generated.
+4. ~~Live opportunity scanner: broad cost-aware scan across supported markets~~ — done; `python3 verify.py --phase 8` passes and `data/public/opportunity_scan_latest.*` is generated. Limitless is read-only in this scanner; no Limitless execution is wired.
 5. OKX.AI ASP listing, service registration, Payment SDK, a real pay-per-call round trip.
 6. Funded execution path: credentials, risk limits, dry-run/live switch, order placement, and post-trade receipts.
 7. Public calibration page and distribution surfaces.
@@ -156,12 +157,16 @@ Completion criteria:
 Current status: not built.
 
 What exists: `src/rwoo/scanner.py` finds and ranks actionable cost-adjusted
-candidates from live markets. It writes JSON/Markdown artifacts and Phase 8
-proves the scanner runs.
+candidates from live Kalshi/Polymarket markets and read-only Limitless market
+data. It writes JSON/Markdown artifacts and Phase 8 proves the scanner runs.
+Limitless grouped markets are flattened, broad economics/sports/other markets
+are classified, and unsupported Limitless shapes are counted as skips.
 
 Why incomplete: no exchange credential flow, wallet approval flow, order
 placement API, max-size/risk-limit policy, or post-trade receipt is wired.
-The scanner says what the engine would trade; it does not spend funds.
+Limitless specifically still needs exact fee calculation from its dynamic CLOB
+fee rules/profile fields before any Limitless edge can be actionable. The
+scanner says what the engine would trade; it does not spend funds.
 
 Completion criteria:
 
@@ -169,6 +174,41 @@ Completion criteria:
 - Wire authenticated exchange/order APIs only after credentials are approved.
 - Record every submitted order and fill as a receipt.
 - Make live mode impossible without explicit operator configuration.
+
+### Limitless venue expansion
+
+Current status: read-only scanned venue.
+
+What exists: `src/rwoo/readers/limitless.py` reads public active/search/detail
+market data, flattens grouped markets, maps `tradePrices` to bid/ask-like
+spread, records collateral/fee metadata in `raw`, and classifies Limitless
+markets into weather/economics/sports/other. Phase 8 now checks that Limitless
+was read live, grouped children were flattened, unsupported shapes were
+skipped, and no Limitless record is actionable while the exact fee term is not
+computed.
+
+Known support boundary:
+
+- Weather remains the flagship domain, but the 2026-07-09 Limitless live scan
+  did not expose a true parseable weather market. Limitless weather markets
+  should be added before sports breadth whenever a market gives station/source,
+  date, metric, strike, and settlement source clearly enough to feed
+  `engines/weather.py`.
+- Economics Limitless markets exist, including headline CPI, GDP, recession,
+  and Fed-rate shapes. The current engine supports core CPI, not headline CPI
+  or GDP/Fed/recession markets, so those are classified and skipped.
+- Sports Limitless markets are broad. The current supported sports engine is
+  2026 FIFA World Cup national-team outright winner only. NBA/NHL/EPL/tennis,
+  esports, props, stages, exact matchups, and player-stat markets need their
+  own deterministic source/model paths before they can be actionable.
+
+Completion criteria:
+
+- Add a Limitless weather parser once a live Limitless weather market provides
+  structured-enough settlement fields, and prove it with Phase 8 or a new gate.
+- Add exact Limitless fee calculation from official fee/profile/order rules.
+- Add new deterministic economics/sports engines before widening Limitless
+  actionable support beyond core-compatible CPI and World Cup outright shapes.
 
 ### Public calibration page
 
