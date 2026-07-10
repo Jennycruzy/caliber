@@ -244,6 +244,10 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
         implied_prob=implied_prob,
         spread=spread,
         fetched_at=_now_iso(),
+        # A flattened child's own title is the specific outcome YES prices; a
+        # raw "A vs B" title (no per-outcome child) binds to neither player and
+        # so is correctly left unbindable downstream.
+        yes_subtitle=market.get("title"),
         raw=raw,
     )
 

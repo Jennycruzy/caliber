@@ -72,5 +72,66 @@ class WorldCupStageParsingTests(unittest.TestCase):
         self.assertIsNone(_sports("Who will win the 2026 Super Bowl?"))
 
 
+class TennisMatchParsingTests(unittest.TestCase):
+    def _tennis(self, question, venue="limitless", yes_subtitle=None, rule=""):
+        return parse_market(make_market(
+            venue=venue, domain="sports", question=question,
+            yes_subtitle=yes_subtitle, resolution_rule=rule,
+        ))
+
+    def test_one_sided_title_names_yes_player(self):
+        parsed = self._tennis("Wimbledon: Will Sinner beat Alcaraz?")
+        self.assertEqual(parsed.family, "sports.tennis")
+        self.assertEqual(parsed.shape, "match_winner")
+        self.assertEqual(parsed.status, "engine_available")
+        self.assertEqual(parsed.location, "Sinner")        # YES player
+        self.assertEqual(parsed.source_series, "Alcaraz")
+
+    def test_symmetric_binds_yes_to_subtitle_first_player(self):
+        parsed = self._tennis("Wimbledon: Sinner vs Alcaraz", yes_subtitle="Sinner")
+        self.assertEqual(parsed.status, "engine_available")
+        self.assertEqual(parsed.location, "Sinner")
+        self.assertEqual(parsed.source_series, "Alcaraz")
+
+    def test_symmetric_binds_yes_to_subtitle_second_player_inverts(self):
+        # The inversion case: YES resolves to the SECOND-named player, so the
+        # engine must price P(Alcaraz), not P(Sinner).
+        parsed = self._tennis("Wimbledon: Sinner vs Alcaraz", yes_subtitle="Alcaraz")
+        self.assertEqual(parsed.status, "engine_available")
+        self.assertEqual(parsed.location, "Alcaraz")
+        self.assertEqual(parsed.source_series, "Sinner")
+
+    def test_subtitle_full_name_binds_to_short_title_name(self):
+        parsed = self._tennis("Wimbledon: Alcaraz vs Sinner", yes_subtitle="Carlos Alcaraz")
+        self.assertEqual(parsed.location, "Alcaraz")
+
+    def test_binds_yes_from_resolution_rule(self):
+        parsed = self._tennis(
+            "Wimbledon: Sinner vs Alcaraz",
+            rule="Market resolves YES if Alcaraz wins the match.",
+        )
+        self.assertEqual(parsed.status, "engine_available")
+        self.assertEqual(parsed.location, "Alcaraz")
+
+    def test_unbindable_symmetric_is_parse_missing(self):
+        # No yes_subtitle and no rule subject -> refuse rather than guess a side.
+        parsed = self._tennis("Wimbledon: Sinner vs Alcaraz - who wins?")
+        self.assertEqual(parsed.family, "sports.tennis")
+        self.assertEqual(parsed.status, "parse_missing")
+
+    def test_subtitle_naming_third_party_is_parse_missing(self):
+        parsed = self._tennis("Wimbledon: Sinner vs Alcaraz", yes_subtitle="Djokovic")
+        self.assertEqual(parsed.status, "parse_missing")
+
+    def test_tennis_without_versus_returns_none(self):
+        # a tennis outright (no 'vs') is not a head-to-head; parser declines so
+        # coverage can classify it as a tournament-winner shape.
+        self.assertIsNone(self._tennis("Wimbledon winner 2026?"))
+
+    def test_versus_without_tennis_keyword_returns_none(self):
+        # 'A vs B' with no tennis signal must not be mis-routed to the tennis engine.
+        self.assertIsNone(self._tennis("France vs Spain - who advances?"))
+
+
 if __name__ == "__main__":
     unittest.main()

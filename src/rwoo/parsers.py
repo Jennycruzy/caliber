@@ -79,7 +79,7 @@ def parse_sports_market(market) -> ParsedMarket | None:
             if match:
                 team, stage_text = match.group(1), match.group(2)
     if team is None:
-        return None
+        return _parse_tennis_match_market(market)
     stage_key = stage_key_from_text(stage_text)
     if stage_key is None:
         return ParsedMarket(
@@ -102,6 +102,126 @@ def parse_sports_market(market) -> ParsedMarket | None:
         source_series=stage_key,
         settlement_source=market.resolution_source,
         raw={"question": question},
+    )
+
+
+_TENNIS_KEYWORDS = (
+    "wimbledon", "roland garros", "us open", "australian open", "atp", "wta", "tennis",
+)
+_VERSUS_SPLIT_RE = re.compile(r"\s+vs?\.?\s+", re.IGNORECASE)
+# One-sided titles name the YES player directly and need no external label.
+_WILL_BEAT_RE = re.compile(
+    r"^Will (.+?) (?:beat|defeat|win against|get past|knock out|advance past) (.+?)\??$",
+    re.IGNORECASE,
+)
+_RULE_YES_SUBJECT_RE = re.compile(
+    r"resolves?\s+yes\s+if\s+(.+?)\s+(?:wins|beats|defeats|advances|is the winner)",
+    re.IGNORECASE,
+)
+
+
+def _split_versus(question: str) -> tuple[str, str] | None:
+    """Extract the two competitors from a '<A> vs <B>' title, tolerating a
+    leading '<Tournament>:' prefix and a trailing ' - <question>' clause."""
+    core = question.split(":", 1)[1] if ":" in question else question
+    core = re.split(r"\s[-–—?]\s|\?", core, maxsplit=1)[0]
+    parts = _VERSUS_SPLIT_RE.split(core.strip())
+    if len(parts) != 2:
+        return None
+    a, b = parts[0].strip(" -"), parts[1].strip(" -")
+    if not a or not b:
+        return None
+    return a, b
+
+
+def _bind_yes_player(subject: str | None, player_a: str, player_b: str) -> str | None:
+    """Bind the venue's YES-outcome label to exactly one of the two players.
+
+    Returns the original player string that YES resolves to, or None when the
+    subject is empty, names neither, or is decidable for both (e.g. a raw
+    'A vs B' label). Binding is by shared normalized token so 'Carlos Alcaraz'
+    still binds to a title that only said 'Alcaraz'; ambiguity fails closed."""
+    from rwoo.engines.sports import _normal_name  # single normalization authority
+
+    subj = _normal_name(subject or "")
+    if not subj:
+        return None
+    subj_tokens = set(subj.split())
+    hits = [
+        original
+        for original in (player_a, player_b)
+        if _normal_name(original) == subj or (subj_tokens & set(_normal_name(original).split()))
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _tennis_parsed(market, yes_player: str, other_player: str, why: str) -> ParsedMarket:
+    return ParsedMarket(
+        domain="sports",
+        family="sports.tennis",
+        shape="match_winner",
+        status="engine_available",
+        reason=f"tennis head-to-head; {why}, so the engine prices P(YES player wins)",
+        location=yes_player,        # engine computes P(location wins) == P(YES wins)
+        source_series=other_player,
+        settlement_source=market.resolution_source,
+        raw={"question": market.question},
+    )
+
+
+def _parse_tennis_match_market(market) -> ParsedMarket | None:
+    """Head-to-head tennis markets, priced by the UTS Elo engine.
+
+    The YES side is never assumed from title word order. A one-sided
+    'Will A beat B?' title names YES directly; a symmetric 'A vs B' title binds
+    YES to a player via the venue's `yes_subtitle` (or the resolution rule).
+    If YES cannot be bound to exactly one of the two players, the market is
+    returned as parse_missing (non-actionable) rather than risk an inverted
+    edge."""
+    question = market.question or ""
+    lowered = question.lower()
+    if not any(keyword in lowered for keyword in _TENNIS_KEYWORDS):
+        return None
+
+    core = question.split(":", 1)[1].strip() if ":" in question else question.strip()
+    one_sided = _WILL_BEAT_RE.match(core)
+    if one_sided:
+        return _tennis_parsed(
+            market, one_sided.group(1).strip(), one_sided.group(2).strip(),
+            "one-sided title names the YES player",
+        )
+
+    players = _split_versus(question)
+    if players is None:
+        return None  # a tennis market, but not a parseable head-to-head (e.g. a tournament winner)
+    player_a, player_b = players
+
+    subject = getattr(market, "yes_subtitle", None)
+    if not subject:
+        rule_match = _RULE_YES_SUBJECT_RE.search(market.resolution_rule or "")
+        subject = rule_match.group(1) if rule_match else None
+
+    yes_player = _bind_yes_player(subject, player_a, player_b)
+    if yes_player is None:
+        return ParsedMarket(
+            domain="sports",
+            family="sports.tennis",
+            shape="match_winner",
+            status="parse_missing",
+            reason=(
+                "tennis head-to-head recognized and the UTS Elo engine is wired, but the YES "
+                "outcome could not be bound to one of the two players (no usable yes_subtitle or "
+                "resolution-rule subject) — refusing rather than guessing which side YES is"
+            ),
+            location=player_a,
+            source_series=player_b,
+            settlement_source=market.resolution_source,
+            raw={"question": question, "yes_subtitle": subject},
+        )
+    other_player = player_b if yes_player == player_a else player_a
+    return _tennis_parsed(
+        market, yes_player, other_player,
+        "YES side bound to a specific player from venue metadata",
     )
 
 

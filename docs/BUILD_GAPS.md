@@ -1,6 +1,56 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-09 (second session: engine-breadth expansion)
+Last updated: 2026-07-10 (third session: parser tests, Phase 9 coverage gate,
+tennis/NBA sources, head-to-head YES-side binding)
+
+## 2026-07-10 Session — tests, Phase 9 gate, tennis/NBA, YES-binding
+
+Done this session (each verified live before commit):
+
+- Parser unit tests (closes Remaining item 1): the first tests in the repo —
+  stdlib `unittest`, run with `python3 -m unittest discover`. 54 offline tests
+  pin the family/shape/status contract of `parsers.py` across economics
+  (Kalshi KXCPIYOY/KXECONSTATCPI/KXGDP/KXU3/KXPAYROLLS/KXFED and Limitless
+  free-text CPI/GDP/Fed), World Cup stage titles, weather series/station
+  routing, tennis head-to-head, coverage classifications, and the Elo /
+  name-matching helpers. No network in the tests.
+- Phase 9 coverage gate in `verify.py` (closes Remaining item 2): proves broad
+  live ingestion across >=2 venues with per-record family/shape/status; prices
+  at least one real record per newer engine family (weather low, monthly CPI,
+  GDP, U-3, payrolls, World Cup stage, tennis) through the full
+  `evaluate_market` path from live sources; and asserts honest restraint (a
+  far-dated Fed market spanning a scheduled FOMC meeting is refused, the NBA
+  champion outright stays model_missing, NBA head-to-head prices but stays
+  below the actionable floor). `python3 verify.py --phase 9` passes.
+- Tennis wired (was source_missing): `readers/tennis_uts.py` reads the Ultimate
+  Tennis Statistics ELO_RANK table (HTTP 200, no key, verified live
+  2026-07-10) — official ATP is 403 (Cloudflare) and the Sackmann CSV mirror
+  404s from this workspace, so neither is usable here.
+  `engines/sports.compute_tennis_match_probability` prices head-to-head via the
+  existing Elo win expectation (single-source, confidence scales with
+  rating-gap decisiveness, capped 0.68). Parser + scanner route tennis "A vs B"
+  / "Will A beat B?" markets. Coverage: tennis head-to-head -> engine_available;
+  tennis outright -> model_missing (source reachable, draw/bracket simulation
+  not wired).
+- NBA wired as priced-but-deferred (was source_missing): `readers/nba_espn.py`
+  reads ESPN standings (HTTP 200, no key, verified 2026-07-10; merges both
+  conference groups to 30 teams) — stats.nba.com times out and balldontlie is
+  now key-gated. `engines/sports.compute_nba_match_probability` prices from
+  season point differential (normal game-margin model, SD 12) with confidence
+  HARD-CAPPED at 0.50, deliberately below the 0.55 actionable floor: NBA prices
+  as information but never stakes on a single signal (refuses if a side has <10
+  games). Coverage: NBA champion -> model_missing (ESPN reachable, champion
+  simulation not wired).
+- Head-to-head YES-side binding (hardening): added
+  `CanonicalMarket.yes_subtitle`, populated by all three readers (Kalshi
+  `yes_sub_title`, Polymarket `groupItemTitle`/`outcomes[0]`, Limitless
+  flattened child `title`). The tennis parser no longer assumes the first-named
+  player is YES; it binds YES to a specific player from `yes_subtitle` or the
+  resolution rule, and returns parse_missing (non-actionable) when it cannot
+  bind exactly one — so an inverted edge can never enter the actionable set.
+  Proven end-to-end: the same matchup with YES bound to each side gives
+  complementary probabilities. The `yes_subtitle` field now exists for any
+  future head-to-head (NBA match, soccer).
 
 ## 2026-07-09 Engine-Breadth Session — done vs. remaining
 
@@ -49,13 +99,11 @@ Done this session (each verified live before commit):
 
 Remaining (next session, in this order):
 
-1. Unit tests for `parsers.py` shapes (tests/ is still empty) — CPI
-   annual/monthly bins, GDP quarter bins, KXECONSTAT exact bins, Fed/U3/
-   payroll tickers, WC stage titles, weather series/station routing.
-2. Phase 9 coverage gate in `verify.py`: prove broad ingestion, per-record
-   family/shape/status fields, at least one priced record per new engine
-   family (weather low, CPI monthly, GDP, labor, WC stage), and honest
-   refusal paths (KXFED far meetings, tennis/NBA source_missing).
+1. ~~Unit tests for `parsers.py` shapes~~ — DONE 2026-07-10: 54 stdlib
+   unittest tests (`python3 -m unittest discover`); see this session's notes.
+2. ~~Phase 9 coverage gate in `verify.py`~~ — DONE 2026-07-10:
+   `python3 verify.py --phase 9` passes. (Its tennis/NBA checks now assert the
+   priced/deferred states, not the retired `source_missing` verdict.)
 3. Regenerate `data/public/opportunity_scan_latest.*` with a full scan and
    commit; compare coverage_status_counts against the 2026-07-09 morning
    artifact (parse_missing 328 / model_missing 298 should drop sharply).
@@ -80,20 +128,28 @@ Remaining (next session, in this order):
    appears with station/date/strike, add the Limitless weather parser path.
 10. Non-US CPI (China/Korea/etc.): official sources (NBS/KOSIS) not wired;
     stays source_missing.
-11. Sports beyond the World Cup — two sources VERIFIED REACHABLE 2026-07-09
-    but not yet wired into engines:
-    - ClubElo public API (api.clubelo.com/YYYY-MM-DD, HTTP 200, full current
-      club Elo table, no key) -> club-soccer match winners and outrights
-      (Limitless soccer matches, EPL/UCL outrights).
-    - MLB official StatsAPI (statsapi.mlb.com, HTTP 200, 30 teams, live
-      daily schedule, no key; MLB is IN SEASON) -> team-rating engine from
-      real results (Elo replay like sports_elo.py) for Kalshi KXMLB
-      moneylines.
-    Blocked/deferred and why: tennis (ATP 403, community data 404), NBA
-    (stats.nba.com timeout), NHL (API reachable but offseason — engine
-    cannot honestly clear the confidence floor until real 2026-27 results
-    exist), esports (no free verified source). Player props and the ~600k
-    Kalshi parlay/multigame markets need player-level sources and
+11. Sports beyond the World Cup:
+    - Tennis — DONE 2026-07-10 (head-to-head): UTS Elo wired; "A vs B" /
+      "Will A beat B?" markets price via the Elo win expectation with
+      fail-closed YES-side binding. STILL OPEN: tennis tournament-winner
+      outrights need a draw/bracket simulation (source reachable, sim not
+      wired -> model_missing).
+    - NBA — DONE 2026-07-10 (priced-but-deferred, head-to-head): ESPN
+      standings wired; point-differential match engine prices but is capped
+      below the actionable floor. STILL OPEN: NBA champion outright needs a
+      season/playoff simulation (source reachable, sim not wired ->
+      model_missing).
+    - ClubElo public API (api.clubelo.com/YYYY-MM-DD, HTTP 200, no key,
+      verified 2026-07-09) -> club-soccer match winners and outrights; NOT yet
+      wired.
+    - MLB official StatsAPI (statsapi.mlb.com, HTTP 200, 30 teams, no key,
+      verified 2026-07-09; MLB is IN SEASON) -> team-rating engine from real
+      results (Elo replay like sports_elo.py) for Kalshi KXMLB moneylines;
+      NOT yet wired.
+    Still blocked/deferred and why: NHL (official API reachable but offseason —
+    engine cannot honestly clear the confidence floor until real 2026-27
+    results exist), esports (no free verified source). Player props and the
+    ~600k Kalshi parlay/multigame markets need player-level sources and
     correlated-leg models — a separate, much deeper tier of work.
 
 This file records incomplete work that must not be forgotten between phases.

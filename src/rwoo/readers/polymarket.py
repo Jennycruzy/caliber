@@ -67,6 +67,17 @@ def to_canonical(market: dict) -> CanonicalMarket:
 
     domain = classify_polymarket(event_tags, market.get("question", ""))
 
+    # implied_prob prices outcomes[0]. For a subject-vs-subject event that is a
+    # generic "Yes", so the real subject is the market's groupItemTitle; fall
+    # back to a non-Yes/No first outcome label.
+    import json as _json
+    outcomes_raw = market.get("outcomes")
+    outcomes = _json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else (outcomes_raw or [])
+    first_outcome = outcomes[0] if outcomes else None
+    yes_subtitle = market.get("groupItemTitle") or (
+        first_outcome if first_outcome and str(first_outcome).strip().lower() not in ("yes", "no") else None
+    )
+
     return CanonicalMarket(
         venue="polymarket",
         market_id=market.get("conditionId", market.get("id", "")),
@@ -78,6 +89,7 @@ def to_canonical(market: dict) -> CanonicalMarket:
         implied_prob=implied_prob,
         spread=spread,
         fetched_at=_now_iso(),
+        yes_subtitle=yes_subtitle,
         raw=market,
     )
 

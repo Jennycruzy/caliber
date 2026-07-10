@@ -16,6 +16,11 @@ class CanonicalMarket:
     implied_prob: float  # bid/ask midpoint, NOT last trade
     spread: float  # ask - bid, i.e. trading friction
     fetched_at: str  # ISO8601 timestamp this object was built
+    # The venue-native label of the outcome `implied_prob` prices (e.g. the
+    # player a Kalshi YES backs, a Polymarket groupItemTitle, a Limitless child
+    # title). Head-to-head engines bind their probability to THIS side instead
+    # of guessing from title word order; None when the venue exposes no label.
+    yes_subtitle: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def describe(self) -> str:

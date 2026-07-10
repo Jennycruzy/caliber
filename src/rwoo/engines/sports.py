@@ -642,3 +642,162 @@ def compute_world_cup_probability(question: str) -> dict:
         "base_rate": softmax_prob,
         "refused": False,
     }
+
+
+def _match_entity(query: str, rows: list[dict], name_key: str = "name") -> dict | None:
+    """Match a market's player/team name to a ratings row. Tries a full
+    normalized-name equality first, then a single-token (surname / city)
+    match — but only when exactly one row contains that token, so an
+    ambiguous surname refuses rather than guessing the wrong competitor."""
+    wanted = _normal_name(query)
+    if not wanted:
+        return None
+    for row in rows:
+        if _normal_name(row[name_key]) == wanted:
+            return row
+    tokens = wanted.split()
+    if len(tokens) == 1:
+        token = tokens[0]
+        hits = [row for row in rows if token in _normal_name(row[name_key]).split()]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
+def _tennis_refusal(reason: str, player_a: str, player_b: str, method: str) -> dict:
+    return {
+        "oracle_prob": None,
+        "confidence": 0.0,
+        "prob_low": None,
+        "prob_high": None,
+        "per_source_values": {"player_a": player_a, "player_b": player_b},
+        "method": method,
+        "data_freshness": datetime.now(timezone.utc).isoformat(),
+        "base_rate": None,
+        "refused": True,
+        "reason": reason,
+    }
+
+
+def compute_tennis_match_probability(player_a: str, player_b: str) -> dict:
+    """P(player_a beats player_b) from published Ultimate Tennis Statistics
+    Elo ratings via the standard Elo win expectation. Single-source: confidence
+    scales with how decisive the rating gap is and is capped, so only a clear
+    favorite clears the actionable floor."""
+    from rwoo.readers import tennis_uts
+
+    try:
+        ratings = tennis_uts.fetch_player_elo_ratings()
+    except Exception as exc:  # noqa: BLE001
+        return _tennis_refusal(
+            f"tennis Elo source unavailable: {exc}", player_a, player_b, "tennis_source_unavailable"
+        )
+    row_a = _match_entity(player_a, ratings)
+    row_b = _match_entity(player_b, ratings)
+    if not row_a or not row_b:
+        return _tennis_refusal(
+            f"could not match both players to the UTS Elo table "
+            f"(matched_a={bool(row_a)}, matched_b={bool(row_b)})",
+            player_a, player_b, "tennis_unmatched_player",
+        )
+    prob = _elo_win_probability(row_a["rating"], row_b["rating"])
+    decisiveness = abs(prob - 0.5)
+    confidence = min(0.68, 0.40 + decisiveness * 0.9)
+    return {
+        "oracle_prob": prob,
+        "confidence": confidence,
+        "prob_low": max(0.0, prob - 0.06),
+        "prob_high": min(1.0, prob + 0.06),
+        "per_source_values": {
+            "player_a": {"name": row_a["name"], "rank": row_a.get("rank"), "elo": row_a["rating"]},
+            "player_b": {"name": row_b["name"], "rank": row_b.get("rank"), "elo": row_b["rating"]},
+            "elo_win_expectation": prob,
+        },
+        "method": (
+            "Ultimate Tennis Statistics published men's Elo -> standard Elo win expectation; "
+            "single-source, so confidence reflects rating-gap decisiveness and is capped (no "
+            "surface/head-to-head/form adjustment, no independent second ratings source yet)"
+        ),
+        "data_freshness": datetime.now(timezone.utc).isoformat(),
+        "base_rate": 0.5,
+        "refused": False,
+    }
+
+
+# NBA: an SD-of-margin normal model on season point differential. One point of
+# per-game differential shifts the predicted single-game margin one-for-one;
+# the SD of an NBA game margin is ~12 points.
+_NBA_MARGIN_SD = 12.0
+# Single-signal restraint: point differential omits home court, rest, injuries,
+# and game-by-game form, so NBA confidence is deliberately held below the
+# actionable floor (edge.DEFAULT_MIN_CONFIDENCE) until a multi-signal engine
+# exists. NBA prices as information; it does not yet stake.
+_NBA_CONFIDENCE_CAP = 0.50
+
+
+def compute_nba_match_probability(team_a: str, team_b: str) -> dict:
+    """P(team_a beats team_b) from ESPN season point differential. Priced but
+    intentionally sub-actionable (see _NBA_CONFIDENCE_CAP); refuses if the
+    current standings are too thin to be real form."""
+    from rwoo.readers import nba_espn
+
+    def refuse(reason: str, method: str) -> dict:
+        return {
+            "oracle_prob": None,
+            "confidence": 0.0,
+            "prob_low": None,
+            "prob_high": None,
+            "per_source_values": {"team_a": team_a, "team_b": team_b},
+            "method": method,
+            "data_freshness": datetime.now(timezone.utc).isoformat(),
+            "base_rate": None,
+            "refused": True,
+            "reason": reason,
+        }
+
+    try:
+        standings = nba_espn.fetch_team_strength()
+    except Exception as exc:  # noqa: BLE001
+        return refuse(f"NBA standings source unavailable: {exc}", "nba_source_unavailable")
+    teams = standings["teams"]
+    row_a = _match_entity(team_a, teams)
+    row_b = _match_entity(team_b, teams)
+    if not row_a or not row_b:
+        return refuse(
+            f"could not match both teams to ESPN standings "
+            f"(matched_a={bool(row_a)}, matched_b={bool(row_b)})",
+            "nba_unmatched_team",
+        )
+    games = [row_a.get("games_played") or 0, row_b.get("games_played") or 0]
+    min_games = min(games)
+    if min_games < 10:
+        return refuse(
+            f"only {min_games} games played by a side; too thin to price current form "
+            "(offseason or season just started)",
+            "nba_insufficient_current_season_games",
+        )
+    margin = row_a["avg_point_diff"] - row_b["avg_point_diff"]
+    prob = 0.5 * (1.0 + math.erf(margin / (_NBA_MARGIN_SD * math.sqrt(2.0))))
+    games_factor = min(1.0, min_games / 41.0)  # full confidence only past a half season
+    decisiveness = abs(prob - 0.5)
+    confidence = min(_NBA_CONFIDENCE_CAP, games_factor * (0.30 + decisiveness))
+    return {
+        "oracle_prob": prob,
+        "confidence": confidence,
+        "prob_low": max(0.0, prob - 0.08),
+        "prob_high": min(1.0, prob + 0.08),
+        "per_source_values": {
+            "team_a": {"name": row_a["name"], "avg_point_diff": row_a["avg_point_diff"], "games": row_a.get("games_played")},
+            "team_b": {"name": row_b["name"], "avg_point_diff": row_b["avg_point_diff"], "games": row_b.get("games_played")},
+            "predicted_margin": margin,
+            "season": standings.get("season"),
+        },
+        "method": (
+            "ESPN season point-differential (SRS-style) -> normal game-margin model "
+            "(SD 12 pts); single-signal, so confidence is capped below the actionable floor "
+            "until a multi-signal engine (home court, rest, injuries, game-by-game Elo) is wired"
+        ),
+        "data_freshness": datetime.now(timezone.utc).isoformat(),
+        "base_rate": 0.5,
+        "refused": False,
+    }

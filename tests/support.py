@@ -19,6 +19,7 @@ def make_market(
     resolution_rule: str = "",
     resolution_source: str = "official source",
     market_id: str = "TEST-1",
+    yes_subtitle: str | None = None,
     raw: dict[str, Any] | None = None,
 ) -> CanonicalMarket:
     return CanonicalMarket(
@@ -32,6 +33,7 @@ def make_market(
         implied_prob=0.5,
         spread=0.02,
         fetched_at="2026-07-10T00:00:00Z",
+        yes_subtitle=yes_subtitle,
         raw=raw or {},
     )
 

@@ -1834,6 +1834,306 @@ def phase_8():
     return 0 if all_pass else 1
 
 
+_P9_MONTH_ABBR = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+]
+
+
+def _p9_market(venue, domain, question="", resolution_rule="", raw=None):
+    """Build a real-shaped CanonicalMarket for Phase 9. Only the market's
+    metadata (ticker/strike/title) is constructed; every probability is
+    computed by the real engine from live sources, so a source outage FAILs
+    the check honestly rather than faking a pass."""
+    from rwoo.models import CanonicalMarket
+    from datetime import datetime, timezone
+
+    return CanonicalMarket(
+        venue=venue,
+        market_id="PHASE9-PROBE",
+        question=question,
+        domain=domain,
+        resolution_rule=resolution_rule,
+        resolution_source="official source",
+        resolution_time="2026-12-31T00:00:00Z",
+        implied_prob=0.5,
+        spread=0.02,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+        raw=raw or {},
+    )
+
+
+def phase_9():
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 9")
+    print("GATE 9: Broad coverage + per-family pricing + honest refusals")
+    print(RULE)
+    print()
+    print("This gate proves three things end to end against live sources:")
+    print("  1. broad ingestion across venues, every record carrying")
+    print("     family/shape/coverage-status fields;")
+    print("  2. at least one real priced record per newer engine family")
+    print("     (weather low, monthly CPI, GDP, U-3, payrolls, World Cup stage),")
+    print("     each priced by the real engine from live data via evaluate_market;")
+    print("  3. honest restraint paths (a far-dated Fed market that spans a")
+    print("     scheduled FOMC meeting is refused; the NBA champion outright is")
+    print("     deferred; NBA head-to-head prices but stays sub-actionable).")
+
+    from datetime import datetime, timedelta, timezone
+
+    from rwoo import scanner
+    from rwoo.coverage import classify_market_shape
+    from rwoo.engines import economics, sports
+    from rwoo import economic_sources
+
+    today = datetime.now(timezone.utc).date()
+
+    def _event_suffix(d, with_day):
+        base = f"{d.strftime('%y')}{_P9_MONTH_ABBR[d.month - 1]}"
+        return base + d.strftime("%d") if with_day else base
+
+    def _kalshi_raw(**fields):
+        return {"market": dict(fields)}
+
+    # ---- Part 1: broad ingestion ----
+    hdr("PART 1 — BROAD LIVE INGESTION")
+    scan = None
+    try:
+        scan = scanner.scan_opportunities(
+            max_weather_markets_per_series=12,
+            max_economics_markets=12,
+            kalshi_active_limit=120,
+            polymarket_limit=120,
+            limitless_limit=120,
+        )
+        show_json("Coverage summary", {
+            "markets_seen": scan["markets_seen"],
+            "markets_evaluated": scan["markets_evaluated"],
+            "markets_included": scan.get("markets_included"),
+            "venue_counts": scan.get("venue_counts"),
+            "domain_counts": scan.get("domain_counts"),
+            "coverage_status_counts": scan.get("coverage_status_counts"),
+        }, max_chars=1400)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: broad scan raised an error: {exc}")
+
+    venue_counts = scan.get("venue_counts", {}) if scan else {}
+    status_counts = scan.get("coverage_status_counts", {}) if scan else {}
+    top_records = scan.get("top", []) if scan else []
+    broad_ingestion_ok = (
+        scan is not None
+        and scan["markets_seen"] >= 80
+        and len([v for v, n in venue_counts.items() if n > 0]) >= 2
+    )
+    per_record_fields_ok = bool(top_records) and all(
+        record.get("family") and record.get("shape") and record.get("coverage_status")
+        for record in top_records
+    )
+    # honest refusal states must actually appear in the live inventory.
+    refusal_states_ok = any(
+        status_counts.get(state, 0) > 0
+        for state in ("parse_missing", "source_missing", "model_missing")
+    )
+
+    # ---- Part 2: one priced record per newer engine family ----
+    hdr("PART 2 — PER-FAMILY LIVE PRICING (via evaluate_market)")
+    next_month = today.month % 12 + 1
+    next_month_year = today.year + (1 if today.month == 12 else 0)
+    weather_date = today + timedelta(days=2)
+
+    gdp_quarter_label = None
+    try:
+        gdp_quarter_label = economic_sources.fetch_gdpnow_current().quarter_label
+    except Exception as exc:  # noqa: BLE001
+        print(f"NOTE: could not read live GDPNow quarter: {exc}")
+
+    wc_team = None
+    try:
+        wc_state = sports.fetch_world_cup_state()
+        wc_team = next((m["home"] for m in wc_state["matches"] if m.get("home")), None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"NOTE: could not read live World Cup state: {exc}")
+
+    family_markets = {
+        "weather.temperature (daily low)": _p9_market(
+            "kalshi", "weather",
+            raw=_kalshi_raw(
+                series_ticker="KXLOWTNYC",
+                event_ticker=f"KXLOWTNYC-{_event_suffix(weather_date, with_day=True)}",
+                strike_type="greater", floor_strike=60,
+            ),
+        ),
+        "economics.headline_cpi (monthly)": _p9_market(
+            "kalshi", "economics", question="Will CPI month-over-month be exactly 0.3%?",
+            raw=_kalshi_raw(
+                series_ticker="KXECONSTATCPI",
+                event_ticker=f"KXECONSTATCPI-{_event_suffix(today, with_day=False)}",
+                ticker=f"KXECONSTATCPI-{_event_suffix(today, with_day=False)}-T0.3",
+                strike_type="custom",
+            ),
+        ),
+        "economics.labor (U-3 unemployment)": _p9_market(
+            "kalshi", "economics",
+            raw=_kalshi_raw(
+                series_ticker="KXU3",
+                event_ticker=f"KXU3-{next_month_year % 100:02d}{_P9_MONTH_ABBR[next_month - 1]}",
+                strike_type="greater", floor_strike=4.2,
+            ),
+        ),
+        "economics.labor (nonfarm payrolls)": _p9_market(
+            "kalshi", "economics",
+            raw=_kalshi_raw(
+                series_ticker="KXPAYROLLS",
+                event_ticker=f"KXPAYROLLS-{next_month_year % 100:02d}{_P9_MONTH_ABBR[next_month - 1]}",
+                strike_type="greater", floor_strike=100,
+            ),
+        ),
+    }
+    if gdp_quarter_label:
+        family_markets["economics.gdp (quarterly)"] = _p9_market(
+            "kalshi", "economics",
+            question=f"Will real GDP growth in Q{gdp_quarter_label[-1]} {gdp_quarter_label[:4]} be above 2%?",
+            raw=_kalshi_raw(
+                series_ticker="KXGDP",
+                event_ticker=f"KXGDP-{_event_suffix(today, with_day=False)}",
+                strike_type="greater", floor_strike=2.0,
+            ),
+        )
+    if wc_team:
+        family_markets["sports.world_cup (stage of elimination)"] = _p9_market(
+            "kalshi", "sports",
+            question=f"Will {wc_team} get eliminated in the Quarterfinals of the 2026 FIFA World Cup?",
+        )
+
+    # Tennis head-to-head prices from published UTS Elo (players verified live).
+    tennis_a, tennis_b = None, None
+    try:
+        from rwoo.readers import tennis_uts
+        tennis_ratings = tennis_uts.fetch_player_elo_ratings()
+        if len(tennis_ratings) >= 2:
+            tennis_a = tennis_ratings[0]["name"]
+            tennis_b = tennis_ratings[1]["name"]
+    except Exception as exc:  # noqa: BLE001
+        print(f"NOTE: could not read live tennis Elo table: {exc}")
+    if tennis_a and tennis_b:
+        # One-sided title names the YES player directly (no venue label needed),
+        # so this exercises the engine without depending on yes_subtitle.
+        family_markets["sports.tennis (head-to-head)"] = _p9_market(
+            "limitless", "sports",
+            question=f"Wimbledon: Will {tennis_a} beat {tennis_b}?",
+        )
+
+    required_families = {
+        "weather.temperature (daily low)",
+        "economics.headline_cpi (monthly)",
+        "economics.gdp (quarterly)",
+        "economics.labor (U-3 unemployment)",
+        "economics.labor (nonfarm payrolls)",
+        "sports.world_cup (stage of elimination)",
+        "sports.tennis (head-to-head)",
+    }
+    priced_families = set()
+    family_rows = []
+    for label, market in family_markets.items():
+        try:
+            record = scanner.evaluate_market(market)
+        except Exception as exc:  # noqa: BLE001
+            family_rows.append({"family": label, "error": str(exc)})
+            continue
+        priced = record is not None and record.oracle_prob is not None
+        if priced:
+            priced_families.add(label)
+        family_rows.append({
+            "family": label,
+            "oracle_prob": None if record is None else record.oracle_prob,
+            "coverage_status": None if record is None else record.coverage_status,
+        })
+    show_json("Per-family live pricing", family_rows, max_chars=2000)
+    per_family_pricing_ok = required_families.issubset(priced_families)
+
+    # ---- Part 3: honest refusal paths ----
+    hdr("PART 3 — HONEST REFUSAL PATHS")
+    far_target = (today + timedelta(days=210)).isoformat()
+    fed_refusal_ok = False
+    try:
+        fed_far = economics.compute_fed_rate_probability(
+            strike_type="between", floor_strike=4.0, cap_strike=4.25, target_date_iso=far_target,
+        )
+        fed_refusal_ok = fed_far.get("refused") is True and fed_far.get("oracle_prob") is None
+        show_json("Far-dated Fed market (must refuse)", {
+            "target_date": far_target,
+            "refused": fed_far.get("refused"),
+            "oracle_prob": fed_far.get("oracle_prob"),
+            "method": fed_far.get("method"),
+        }, max_chars=900)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: Fed refusal probe raised an error: {exc}")
+
+    # NBA outright: source is now reachable (ESPN), but the champion-simulation
+    # engine is deliberately deferred -> model_missing, NOT source_missing.
+    nba_champion = _p9_market(
+        "limitless", "sports", question="Who will be the 2027 NBA champion?",
+    )
+    nba_champion_cov = classify_market_shape(nba_champion)
+    nba_deferred_ok = nba_champion_cov.status == "model_missing" and nba_champion_cov.family == "sports.nba"
+
+    # NBA head-to-head prices from live data but is held below the actionable
+    # floor on purpose (single-signal restraint): priced, not staked.
+    from rwoo.edge import DEFAULT_MIN_CONFIDENCE
+    nba_priced_but_deferred_ok = False
+    nba_probe = {}
+    try:
+        from rwoo.readers import nba_espn
+        nba_teams = nba_espn.fetch_team_strength()["teams"]
+        # pick the strongest and weakest by point differential for a decisive gap.
+        ordered = sorted(nba_teams, key=lambda t: t["avg_point_diff"], reverse=True)
+        strong, weak = ordered[0]["name"], ordered[-1]["name"]
+        nba_result = sports.compute_nba_match_probability(strong, weak)
+        nba_priced_but_deferred_ok = (
+            nba_result.get("oracle_prob") is not None
+            and (nba_result.get("confidence") or 0) < DEFAULT_MIN_CONFIDENCE
+        )
+        nba_probe = {
+            "matchup": f"{strong} vs {weak}",
+            "oracle_prob": nba_result.get("oracle_prob"),
+            "confidence": nba_result.get("confidence"),
+            "actionable_floor": DEFAULT_MIN_CONFIDENCE,
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"NOTE: NBA head-to-head probe failed: {exc}")
+
+    show_json("Deferred sports (source reachable, engine restrained)", {
+        "nba_champion": {"family": nba_champion_cov.family, "status": nba_champion_cov.status},
+        "nba_head_to_head": nba_probe,
+    }, max_chars=1000)
+
+    hdr("GATE 9 — ACCEPTANCE CRITERIA")
+    checks = {
+        "Broad live ingestion across >=2 venues": broad_ingestion_ok,
+        "Every ranked record carries family/shape/coverage-status": per_record_fields_ok,
+        "Live inventory contains honest refusal statuses": refusal_states_ok,
+        "Every newer engine family priced a real record from live data": per_family_pricing_ok,
+        "Far-dated Fed market spanning a scheduled meeting is refused": fed_refusal_ok,
+        "NBA champion outright is model_missing (source reachable, sim deferred)": nba_deferred_ok,
+        "NBA head-to-head prices live but stays below the actionable floor": nba_priced_but_deferred_ok,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+    if not per_family_pricing_ok:
+        missing = sorted(required_families - priced_families)
+        print(f"    families not priced this run: {missing}")
+
+    print()
+    print(RULE)
+    print(f"GATE 9 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -1857,6 +2157,8 @@ def main():
         sys.exit(phase_7())
     elif args.phase == 8:
         sys.exit(phase_8())
+    elif args.phase == 9:
+        sys.exit(phase_9())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)

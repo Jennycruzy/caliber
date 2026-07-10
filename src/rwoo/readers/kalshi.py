@@ -151,6 +151,7 @@ def to_canonical(event: dict, market: dict) -> CanonicalMarket:
         implied_prob=implied_prob,
         spread=spread,
         fetched_at=_now_iso(),
+        yes_subtitle=market.get("yes_sub_title"),
         raw={"event": ev, "market": market},
     )
 
@@ -175,6 +176,7 @@ def market_row_to_canonical(market: dict) -> CanonicalMarket:
         implied_prob=implied_prob,
         spread=spread,
         fetched_at=_now_iso(),
+        yes_subtitle=market.get("yes_sub_title"),
         raw={"market": market, "series_ticker": series_ticker},
     )
 

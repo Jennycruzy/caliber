@@ -165,33 +165,37 @@ def _economics_shape_from_text(text: str, venue: str) -> MarketCoverage:
 
 def _sports_shape_from_text(text: str, venue: str) -> MarketCoverage:
     if "wimbledon" in text and " vs " in text:
+        # Head-to-head tennis is parsed and priced upstream (parse_sports_market
+        # -> UTS Elo engine); reaching here means the two players could not be
+        # split out of the title, not that the engine is missing.
         return MarketCoverage(
             family="sports.tennis",
             shape="match_winner",
-            status="source_missing",
+            status="parse_missing",
             reason=(
-                f"{venue} tennis match market included; assessed 2026-07-09: official ATP rankings "
-                "return HTTP 403 from this workspace and no verified alternative ratings source is wired"
+                f"{venue} tennis head-to-head recognized and the Ultimate Tennis Statistics Elo engine "
+                "is wired, but the two players could not be parsed from this title"
             ),
         )
     if "wimbledon" in text and "winner" in text:
         return MarketCoverage(
             family="sports.tennis",
             shape="tournament_winner",
-            status="source_missing",
+            status="model_missing",
             reason=(
-                f"{venue} tennis outright market included; assessed 2026-07-09: no verified tennis "
-                "ratings source is reachable from this workspace"
+                f"{venue} tennis outright market included; the Ultimate Tennis Statistics Elo source is "
+                "reachable (verified 2026-07-10), but a tournament draw/bracket simulation is not wired yet"
             ),
         )
     if "nba" in text and ("champion" in text or "winner" in text):
         return MarketCoverage(
             family="sports.nba",
             shape="league_champion",
-            status="source_missing",
+            status="model_missing",
             reason=(
-                f"{venue} NBA champion market included; assessed 2026-07-09: stats.nba.com times out "
-                "from this workspace and no verified alternative ratings source is wired"
+                f"{venue} NBA champion market included; the ESPN standings source is reachable (verified "
+                "2026-07-10) and a head-to-head point-differential engine exists, but a season/playoff "
+                "champion simulation is not wired yet"
             ),
         )
     if "nhl" in text and ("champion" in text or "winner" in text):
