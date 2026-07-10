@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Playground{% endblock %}
+{% block description %}Build a valid check-market request, see the expected payment, and view the live result, why-trace, and receipt.{% endblock %}
+
+{% block content %}
+<h1>Playground</h1>
+<p class="lede">Compose a request against <code>{{ api_base }}/v1/check-market</code>. This page calls the live API
+from your browser. It never asks for a wallet key and never signs anything — a paid deployment returns the x402
+payment challenge, which your own agent wallet fulfils.</p>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h3>Request</h3>
+    <form id="pg-form">
+      <label for="venue">Venue</label>
+      <select id="venue" name="venue">
+        <option value="kalshi">kalshi</option>
+        <option value="polymarket">polymarket</option>
+        <option value="limitless">limitless</option>
+      </select>
+      <label for="market_id">Market id</label>
+      <input id="market_id" name="market_id" placeholder="KXHIGHNY-26JUL12-B85" autocomplete="off" required>
+      <fieldset style="border:1px solid var(--border);border-radius:8px;margin-top:1rem;padding:.5rem .8rem">
+        <legend class="small muted">Include</legend>
+        <label class="small"><input type="checkbox" id="why" checked style="width:auto;margin-right:.4rem">why trace</label>
+        <label class="small"><input type="checkbox" id="cal" checked style="width:auto;margin-right:.4rem">calibration</label>
+        <label class="small"><input type="checkbox" id="rcpt" checked style="width:auto;margin-right:.4rem">receipt</label>
+      </fieldset>
+      <div class="cta"><button class="btn" type="submit">Send request</button></div>
+      <p class="small muted" id="pg-hint">The request body is shown below before it is sent.</p>
+      <pre id="pg-body" aria-label="Request body"></pre>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Response</h3>
+    <div id="pg-status" class="badges" role="status" aria-live="polite"></div>
+    <div class="result" id="pg-result">
+      <p class="small muted">Send a request to see the live result. Refusals return HTTP 200 with a
+      <code>reason_code</code>; a paid deployment first returns a 402 x402 challenge.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+var API = {{ api_base | tojson }};
+var form = document.getElementById('pg-form');
+function buildBody() {
+  return {
+    market: { venue: document.getElementById('venue').value, market_id: document.getElementById('market_id').value },
+    include: { why_trace: document.getElementById('why').checked, calibration: document.getElementById('cal').checked, receipt: document.getElementById('rcpt').checked }
+  };
+}
+function refresh() { document.getElementById('pg-body').textContent = JSON.stringify(buildBody(), null, 2); }
+form.addEventListener('input', refresh); refresh();
+
+function badge(cls, text) { return '<span class="badge ' + cls + '"><span class="ic" aria-hidden="true"></span>' + text + '</span>'; }
+
+form.addEventListener('submit', async function (e) {
+  e.preventDefault();
+  var statusEl = document.getElementById('pg-status');
+  var resultEl = document.getElementById('pg-result');
+  statusEl.innerHTML = badge('', 'Sending…');
+  try {
+    var r = await fetch(API + '/v1/check-market', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildBody())
+    });
+    var data = await r.json();
+    if (r.status === 402) {
+      statusEl.innerHTML = badge('warn', 'HTTP 402 — payment required (x402)');
+      resultEl.innerHTML = '<p class="small">Expected payment (fulfil with your agent wallet, then re-send the identical body with an <code>X-PAYMENT</code> header):</p>';
+    } else if (r.status === 200 && data.status === 'refused') {
+      statusEl.innerHTML = badge('serious', 'Refused — ' + (data.reason_code || 'unpriceable'));
+      resultEl.innerHTML = '<p class="small">' + (data.explanation || '') + '</p>';
+    } else if (r.status === 200) {
+      statusEl.innerHTML = badge('good', 'Priced');
+      resultEl.innerHTML = '';
+    } else {
+      statusEl.innerHTML = badge('crit', 'HTTP ' + r.status + ' — ' + ((data.error||{}).code || 'error'));
+      resultEl.innerHTML = '';
+    }
+    var pre = document.createElement('pre'); pre.textContent = JSON.stringify(data, null, 2);
+    resultEl.appendChild(pre);
+  } catch (err) {
+    statusEl.innerHTML = badge('crit', 'Network error');
+    resultEl.innerHTML = '<p class="small muted">Could not reach ' + API + '. If the API base is not yet public, this is expected.</p>';
+  }
+});
+</script>
+{% endblock %}

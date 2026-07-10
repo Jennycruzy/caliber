@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Privacy{% endblock %}
+{% block description %}Privacy posture for the Real-World Odds Oracle.{% endblock %}
+
+{% block content %}
+<h1>Privacy</h1>
+{% if not legal_entity %}
+<div class="note empty"><p><strong>Operator identity pending.</strong> The legal entity for this notice has not been
+configured yet, so this page states the data posture in force but does not yet name a controller. Contact:
+<a href="mailto:{{ support_email }}">{{ support_email }}</a>.</p></div>
+{% else %}
+<p class="small muted">Controller: {{ legal_entity }} &middot; Contact: <a href="mailto:{{ support_email }}">{{ support_email }}</a>.</p>
+{% endif %}
+
+<h2>What the API handles</h2>
+<ul class="small">
+  <li>Requests contain a venue and market id, not personal data. A request id is generated per call.</li>
+  <li>Decision receipts commit hashes of the request and decision — never buyer private keys and never private
+  payment data. Payments are settled by your own agent wallet; no key material is accepted or stored.</li>
+  <li>Server logs are redacted of secrets and are used for operating the service.</li>
+</ul>
+
+<h2>What we do not do</h2>
+<ul class="small">
+  <li>We do not take custody of funds or place trades on your behalf.</li>
+  <li>We do not sell request data.</li>
+</ul>
+<p class="small muted">This page will be finalized with the operator's legal identity before public listing.</p>
+{% endblock %}

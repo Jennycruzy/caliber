@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Methodology &amp; limitations{% endblock %}
+{% block description %}How the Real-World Odds Oracle produces probabilities deterministically, how it prices edge and cost, and its honest limitations.{% endblock %}
+
+{% block content %}
+<h1>Methodology &amp; limitations</h1>
+<p class="lede">The product is a paid, evidence-backed decision oracle — not an LLM guessing probabilities, not a
+custodial betting service, not a guaranteed-win product.</p>
+
+<section aria-labelledby="law">
+  <h2 id="law">The Deterministic-Core Law</h2>
+  <div class="note law"><ul class="law">{% for item in law %}<li>{{ item }}</li>{% endfor %}</ul></div>
+</section>
+
+<section aria-labelledby="prob">
+  <h2 id="prob">How a probability is produced</h2>
+  <p>A market is first parsed into a canonical form: the verbatim resolution rule, the named settlement source,
+  the resolution time, the bound entity/location, the strike, and which side YES prices. If any of these cannot
+  be bound, the oracle refuses. Otherwise the market is routed to the matching deterministic engine, which
+  computes an independent probability from real-world sources with an explicit uncertainty interval and a
+  versioned model. No LLM creates, alters, vetoes, or sanity-checks that number.</p>
+</section>
+
+<section aria-labelledby="edge">
+  <h2 id="edge">Edge, cost, and restraint</h2>
+  <p>The edge is <code>oracle_probability − implied_probability</code>, where implied comes from the executable
+  bid/ask midpoint, not the last trade. An edge is only called <strong>actionable</strong> if it clears both the
+  oracle's own uncertainty band and real trading friction:</p>
+  <ul class="small">
+    <li><strong>Kalshi</strong> fees use the published taker formula (0.07 · P · (1−P)).</li>
+    <li><strong>Limitless</strong> fees use the conservative upper bound of the official published buy-fee table.</li>
+    <li><strong>Polymarket</strong> fees are not yet verified — friction there uses the real spread only, and the
+    missing fee term is disclosed, never guessed. A market whose fee cannot be quantified is refused, not over-called.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="conf">
+  <h2 id="conf">Confidence is not calibration</h2>
+  <p>Confidence measures how tightly the deterministic ensemble agrees right now. Calibration is the measured,
+  precommitted historical hit rate with its independent sample count. The site never presents model agreement as
+  proof of accuracy, and never shows a hit rate without the number of independent events behind it.</p>
+</section>
+
+<section aria-labelledby="lim">
+  <h2 id="lim">Limitations</h2>
+  <ul class="small">
+    <li>No forecast is guaranteed to win. Probabilities are estimates.</li>
+    <li>Coverage is deliberately narrow — data-resolvable markets with a wired engine and a verified source.</li>
+    {% for item in deferred %}<li>{{ item }}</li>{% endfor %}
+    <li>Cross-venue edges are never risk-free: fill, custody, venue, cancellation, and settlement risks remain.</li>
+    <li>Funded execution is disabled; this phase places no orders.</li>
+  </ul>
+</section>
+{% endblock %}

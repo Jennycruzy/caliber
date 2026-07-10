@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ site_name }}{% endblock %} — {{ site_name }}</title>
+  <meta name="description" content="{% block description %}A paid, evidence-backed decision oracle for data-resolvable prediction markets. The true odds, proven.{% endblock %}">
+  <link rel="canonical" href="{{ public_base }}{{ request.url.path }}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ site_name }}">
+  <meta property="og:title" content="{% block og_title %}{{ site_name }} — {{ tagline }}{% endblock %}">
+  <meta property="og:description" content="A paid, evidence-backed decision oracle for data-resolvable prediction markets.">
+  <meta property="og:url" content="{{ public_base }}{{ request.url.path }}">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/site.css">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebAPI","name":"{{ site_name }}","description":"Paid decision oracle for data-resolvable prediction markets.","documentation":"{{ public_base }}/docs","provider":{"@type":"Organization","name":"{{ site_name }}"}}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="wrap nav">
+      <a class="brand" href="/"><span class="dot" aria-hidden="true"></span>{{ site_name }} <small>{{ tagline }}</small></a>
+      <nav aria-label="Primary">
+        <ul>
+          {% for path, label in nav %}
+          <li><a href="{{ path }}"{% if active == path %} aria-current="page"{% endif %}>{{ label }}</a></li>
+          {% endfor %}
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site">
+    <div class="wrap">
+      <div class="cols">
+        <div>
+          <div class="brand"><span class="dot" aria-hidden="true"></span>{{ site_name }}</div>
+          <p class="small muted">{{ tagline }} A paid decision API, not a custodial betting service, not an autonomous trading bot, not a guaranteed-win product.</p>
+          <p class="badges">
+            <span class="badge off"><span class="ic" aria-hidden="true"></span>Funded execution disabled</span>
+          </p>
+        </div>
+        <div>
+          <strong class="small">Product</strong>
+          <a href="/docs">Developer docs</a>
+          <a href="/playground">Playground</a>
+          <a href="/markets">Coverage</a>
+          <a href="/status">Status</a>
+        </div>
+        <div>
+          <strong class="small">Evidence</strong>
+          <a href="/calibration">Calibration</a>
+          <a href="/receipts">Receipts</a>
+          <a href="/methodology">Methodology &amp; limitations</a>
+          <a href="{{ api_base }}/openapi.json">OpenAPI</a>
+        </div>
+      </div>
+      <p class="disclaimer">
+        {{ disclaimer }} &middot;
+        <a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a> &middot;
+        <a href="mailto:{{ support_email }}">{{ support_email }}</a> &middot;
+        <span>License: see repository</span>
+      </p>
+    </div>
+  </footer>
+</body>
+</html>

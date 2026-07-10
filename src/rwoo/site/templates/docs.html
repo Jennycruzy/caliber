@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Developer docs{% endblock %}
+{% block description %}Discover the services, payments, schemas, refusals, errors, idempotency, receipts, coverage, and limitations of the Real-World Odds Oracle API.{% endblock %}
+
+{% block content %}
+<h1>Developer documentation</h1>
+<p class="lede">The API base is <code>{{ api_base }}</code>. Interactive schema: <a href="{{ api_base }}/docs">{{ api_base }}/docs</a> &middot; <a href="{{ api_base }}/openapi.json">OpenAPI JSON</a>.</p>
+
+<section aria-labelledby="discovery">
+  <h2 id="discovery">Discovery</h2>
+  <p>Fetch <code>GET {{ api_base }}/v1/service-metadata</code> for the service catalog, identifiers, endpoints,
+  and payment configuration. <code>GET /v1/supported-markets</code> lists venues, families, and series.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Service</th><th scope="col">Method &amp; path</th><th scope="col">Billing</th></tr></thead>
+      <tbody>
+      {% for s in services %}
+        <tr><td><code>{{ s.name }}</code></td><td class="path">{{ s.method }} {{ s.path }}</td><td>{{ "Paid" if s.paid else "Free" }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="pay">
+  <h2 id="pay">Payments — OKX Agent Payments (x402)</h2>
+  <p>Paid endpoints use the HTTP 402 flow. An unpaid request receives a <code>402</code> whose body is the x402
+  challenge (<code>x402Version</code> + <code>accepts[]</code>) with <code>WWW-Authenticate: Payment</code>. Re-send the
+  <em>identical</em> request body with an <code>X-PAYMENT</code> header; on success you receive <code>200</code>, a
+  <code>PAYMENT-RESPONSE</code> header, and a receipt whose <code>payment_reference</code> links the settlement.</p>
+  <ul class="small">
+    <li>The payment is bound to service, request hash, amount, recipient, asset, network, and expiry.</li>
+    <li>A used nonce is rejected (<code>PAYMENT_REPLAYED</code>); an <code>Idempotency-Key</code> retry never double-charges.</li>
+    <li>No buyer private key is ever accepted, and no signing flow is invented — your agent wallet produces the payload.</li>
+  </ul>
+  <p class="small muted">Prices, asset, network, and recipient are set by the operator and appear in
+  <code>/v1/service-metadata</code>. Until configured, paid endpoints run in free mode or fail closed.</p>
+</section>
+
+<section aria-labelledby="ex">
+  <h2 id="ex">Call it</h2>
+  <div class="tabs" role="tablist" aria-label="Code examples">
+    <button role="tab" aria-selected="true" data-tab="curl">curl</button>
+    <button role="tab" aria-selected="false" data-tab="python">Python</button>
+    <button role="tab" aria-selected="false" data-tab="typescript">TypeScript</button>
+    <button role="tab" aria-selected="false" data-tab="agent_json">Agent JSON</button>
+  </div>
+  <pre data-panel="curl">{{ examples.curl }}</pre>
+  <pre data-panel="python">{{ examples.python }}</pre>
+  <pre data-panel="typescript">{{ examples.typescript }}</pre>
+  <pre data-panel="agent_json">{{ examples.agent_json }}</pre>
+</section>
+
+<section aria-labelledby="ref">
+  <h2 id="ref">Refusals vs errors</h2>
+  <p>A market the oracle cannot safely price is a <strong>refusal</strong>: HTTP <code>200</code>,
+  <code>status: "refused"</code>, a stable <code>reason_code</code>, an explanation, the missing capability, and a
+  receipt. Malformed requests, unknown services, and payment failures are transport <strong>errors</strong> (4xx)
+  with a stable JSON shape: <code>{ "error": { "code", "message" }, "request_id" }</code>.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Code</th><th scope="col" class="num">HTTP</th><th scope="col">Meaning</th></tr></thead>
+      <tbody>
+      {% for code, http, meaning in errors %}
+        <tr><td><code>{{ code }}</code></td><td class="num">{{ http }}</td><td class="small">{{ meaning }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="sem">
+  <h2 id="sem">Semantics you must not confuse</h2>
+  <h3>Idempotency</h3>
+  <p class="small">Send an <code>Idempotency-Key</code> header to make a retry return the same result and receipt without re-charging.</p>
+  <h3>Rate limits &amp; timeouts</h3>
+  <p class="small">Requests are bounded and time-limited; a slow upstream returns <code>UPSTREAM_TIMEOUT</code> rather than hanging.</p>
+  <h3>Confidence is not calibration</h3>
+  <p class="small">Model agreement (confidence) is the spread of the ensemble now. Calibration is the measured,
+  precommitted historical hit rate. A high confidence with zero resolved events is not evidence — the API always
+  reports the independent sample count.</p>
+  <h3>Missing data stays missing</h3>
+  <p class="small">An unknown entity, unbound strike, or unverified fee never becomes a silent zero — it becomes a refusal.</p>
+</section>
+
+<section aria-labelledby="ver">
+  <h2 id="ver">Versions &amp; changelog</h2>
+  <p class="small">Every forecast carries its <code>model_version</code>. Current engine versions:</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Family</th><th scope="col">Model version</th></tr></thead>
+      <tbody>
+      {% for family, ver in model_versions.items() %}<tr><td>{{ family }}</td><td><code>{{ ver }}</code></td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <ul class="small">
+    {% for ver, note in changelog %}<li><strong>{{ ver }}</strong> — {{ note }}</li>{% endfor %}
+  </ul>
+</section>
+
+<script>
+document.querySelectorAll('[role="tablist"]').forEach(function (list) {
+  var tabs = list.querySelectorAll('[role="tab"]');
+  var panels = {};
+  document.querySelectorAll('[data-panel]').forEach(function (p) { panels[p.dataset.panel] = p; });
+  function show(name) {
+    tabs.forEach(function (t) { t.setAttribute('aria-selected', t.dataset.tab === name); });
+    Object.keys(panels).forEach(function (k) { panels[k].style.display = k === name ? '' : 'none'; });
+  }
+  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.tab); }); });
+  show(tabs[0].dataset.tab);
+});
+</script>
+{% endblock %}

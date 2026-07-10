@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Calibration evidence{% endblock %}
+{% block description %}The public, precommitted calibration record — counts, independent events, Brier score, reliability, official-source concordance, and promotion eligibility. Missing values are never shown as zero.{% endblock %}
+
+{% block content %}
+<h1>Calibration evidence</h1>
+<p class="lede">Every priced scan record is precommitted before the market resolves; losses and non-actionable
+forecasts are kept. Confidence is earned only through independent, resolved events — never asserted.</p>
+
+{% if not report %}
+<div class="note empty">
+  <p><strong>No calibration report has been generated yet — evidence is accumulating.</strong></p>
+  <p class="small">This is an honest empty state. A family is promoted to higher confidence only at fixed
+  checkpoints (30, 100, 250, 500 independent events) and only when <em>all</em> criteria pass:</p>
+  <ul class="small">
+    <li>≥ 30 independent resolved event groups</li>
+    <li>Brier score ≤ 0.20</li>
+    <li>Maximum calibration gap ≤ 0.15</li>
+    <li>Official-source concordance ≥ 0.95</li>
+  </ul>
+  <p class="small">Machine-readable: <a href="{{ api_base }}/v1/calibration">{{ api_base }}/v1/calibration</a>.</p>
+</div>
+{% else %}
+<p class="badges">
+  <span class="badge muted"><span class="ic" aria-hidden="true"></span>Report generated {{ report.created_at }}</span>
+  {% if report.ledger_verification and report.ledger_verification.valid %}
+  <span class="badge good"><span class="ic" aria-hidden="true"></span>Evidence ledger verified ({{ report.ledger_verification.record_count }} records)</span>
+  {% else %}
+  <span class="badge crit"><span class="ic" aria-hidden="true"></span>Ledger verification failed</span>
+  {% endif %}
+</p>
+
+<div class="tiles">
+  <div class="tile"><div class="value tnum">{{ report.precommitted_forecasts }}</div><div class="label">Precommitted forecasts</div></div>
+  <div class="tile"><div class="value tnum">{{ report.resolved_forecasts }}</div><div class="label">Resolved</div></div>
+  <div class="tile"><div class="value tnum">{{ report.unresolved_forecasts }}</div><div class="label">Unresolved</div></div>
+  <div class="tile"><div class="value tnum">{{ report.independent_resolved_event_groups }}</div><div class="label">Independent events</div></div>
+</div>
+
+{% if report.calibration and report.calibration.overall %}
+{% set ov = report.calibration.overall %}
+<h2>Overall reliability</h2>
+<div class="tiles">
+  <div class="tile"><div class="value tnum">{{ ov.brier_score|round(3) }}</div><div class="label">Brier score (lower is better)</div></div>
+  <div class="tile"><div class="value tnum">{{ ov.max_calibration_gap|round(3) }}</div><div class="label">Max calibration gap</div></div>
+  <div class="tile"><div class="value tnum">{{ ov.count }}</div><div class="label">Scored rows</div></div>
+</div>
+{% if ov.reliability %}
+<div class="table-scroll" style="margin-top:1rem">
+  <table>
+    <caption class="small muted" style="text-align:left;padding:.5rem .8rem">Reliability by probability band — hit rate is only meaningful with its sample count.</caption>
+    <thead><tr><th scope="col">Band</th><th scope="col" class="num">n</th><th scope="col" class="num">Mean predicted</th><th scope="col" class="num">Actual hit rate</th></tr></thead>
+    <tbody>
+    {% for row in ov.reliability %}
+      <tr>
+        <td>{{ row.bucket }}</td>
+        <td class="num">{{ row.count }}</td>
+        <td class="num">{{ (row.mean_predicted*100)|round(1) }}%</td>
+        <td class="num">{{ (row.actual_hit_rate*100)|round(1) }}%</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% else %}
+<div class="note empty"><p class="small">No forecasts have resolved yet, so no reliability curve can be computed. Counts above are real; the curve stays empty rather than showing zeros.</p></div>
+{% endif %}
+
+<h2>Promotion readiness by family</h2>
+<div class="table-scroll">
+  <table>
+    <thead><tr>
+      <th scope="col">Family</th><th scope="col" class="num">Independent events</th>
+      <th scope="col" class="num">Next checkpoint</th><th scope="col">Concordance</th><th scope="col">Eligible</th>
+    </tr></thead>
+    <tbody>
+    {% for family, row in report.promotion_readiness.items() %}
+      <tr>
+        <td>{{ family }}</td>
+        <td class="num">{{ row.independent_event_groups }}</td>
+        <td class="num">{{ row.next_checkpoint if row.next_checkpoint is not none else "—" }}</td>
+        <td>{% if row.official_source_concordance_rate is not none %}{{ (row.official_source_concordance_rate*100)|round(0) }}% ({{ row.official_source_checks }} checks){% else %}<span class="muted small">no checks yet</span>{% endif %}</td>
+        <td>{% if row.eligible %}<span class="badge good"><span class="ic" aria-hidden="true"></span>eligible</span>{% else %}<span class="badge off"><span class="ic" aria-hidden="true"></span>accumulating</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="small muted">{{ report.selection_policy }}</p>
+<p class="small">Machine-readable: <a href="{{ api_base }}/v1/calibration">{{ api_base }}/v1/calibration</a>. Each resolved forecast is receipted — <a href="/receipts">verify receipts</a>.</p>
+{% endif %}
+{% endblock %}

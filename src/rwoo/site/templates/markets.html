@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Coverage{% endblock %}
+{% block description %}Which venues, families, and series the oracle covers, and the current opportunity scan — read live, with honest fail-closed boundaries.{% endblock %}
+
+{% block content %}
+<h1>Coverage &amp; current scan</h1>
+<p class="lede">The oracle only prices markets whose rule, source, time, entity, strike, and YES side can be bound.
+Everything else fails closed. Supported venues: {{ venues|join(", ") }}.</p>
+
+{% if scan %}
+<p class="badges"><span class="badge muted"><span class="ic" aria-hidden="true"></span>Scan generated {{ scan.created_at }}</span></p>
+<div class="tiles">
+  <div class="tile"><div class="value tnum">{{ scan.markets_seen }}</div><div class="label">Markets seen</div></div>
+  <div class="tile"><div class="value tnum">{{ scan.markets_evaluated }}</div><div class="label">Evaluated</div></div>
+  <div class="tile"><div class="value tnum">{{ scan.markets_included }}</div><div class="label">Priced &amp; included</div></div>
+  <div class="tile"><div class="value tnum">{{ scan.actionable_count }}</div><div class="label">Actionable</div></div>
+</div>
+
+<div class="grid cols-3" style="margin-top:1rem">
+  <div class="card"><h3>By venue</h3><dl class="kv">
+    {% for k, v in (scan.venue_counts or {}).items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl></div>
+  <div class="card"><h3>By domain</h3><dl class="kv">
+    {% for k, v in (scan.domain_counts or {}).items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl></div>
+  <div class="card"><h3>By coverage status</h3><dl class="kv">
+    {% for k, v in (scan.coverage_status_counts or {}).items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl></div>
+</div>
+
+{% if scan.top %}
+<h2>Current priced markets</h2>
+<div class="table-scroll">
+  <table>
+    <thead><tr>
+      <th scope="col">Venue</th><th scope="col">Question</th><th scope="col">Family</th>
+      <th scope="col" class="num">Oracle</th><th scope="col" class="num">Implied</th>
+      <th scope="col">Side</th><th scope="col">Actionable</th>
+    </tr></thead>
+    <tbody>
+    {% for r in scan.top[:25] %}
+      {% if r.oracle_prob is not none %}
+      <tr>
+        <td>{{ r.venue }}</td>
+        <td class="small">{{ r.question|truncate(70) }}</td>
+        <td class="small">{{ r.family }}</td>
+        <td class="num">{{ (r.oracle_prob*100)|round(1) }}%</td>
+        <td class="num">{{ (r.implied_prob*100)|round(1) }}%</td>
+        <td>{{ r.side or "—" }}</td>
+        <td>{{ "Yes" if r.actionable else "No" }}</td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% else %}
+<div class="note empty"><p>No opportunity scan snapshot is currently published. This is an honest empty state.</p></div>
+{% endif %}
+
+<h2>Supported domains</h2>
+<div class="grid cols-3">
+  {% for name, desc, level in supported %}
+  <div class="card"><span class="tag">{{ level }}</span><h3>{{ name }}</h3><p class="small">{{ desc }}</p></div>
+  {% endfor %}
+</div>
+
+<h2>Kalshi series with a wired engine</h2>
+<div class="grid cols-3">
+  {% for group, tickers in series.items() %}
+  <div class="card"><h3>{{ group }}</h3><p class="small path">{{ tickers|join(", ") }}</p></div>
+  {% endfor %}
+</div>
+
+<h2>Deferred — fails closed</h2>
+<div class="note empty">
+  {% for item in deferred %}<p class="small">— {{ item }}</p>{% endfor %}
+</div>
+{% endblock %}

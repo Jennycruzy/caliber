@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}The true odds, proven{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <h1>{{ tagline }}</h1>
+  <p class="lede">A paid, evidence-backed decision oracle for data-resolvable prediction markets.
+  Agents and individuals call it for an independent, deterministic probability — with an uncertainty
+  interval, model version, source freshness, model-disagreement explanation, executable bid/ask
+  comparison, estimated fees, net expected value, cross-venue comparison, calibration evidence, and a
+  tamper-evident receipt.</p>
+  <div class="badges" role="status">
+    {% if evidence.report_available %}
+    <span class="badge good"><span class="ic" aria-hidden="true"></span>Calibration evidence: {{ evidence.report.independent_resolved_event_groups }} independent events</span>
+    {% else %}
+    <span class="badge warn"><span class="ic" aria-hidden="true"></span>Calibration evidence accumulating</span>
+    {% endif %}
+    <span class="badge off"><span class="ic" aria-hidden="true"></span>Funded execution disabled</span>
+    {% if evidence.decision_ledger.valid %}
+    <span class="badge good"><span class="ic" aria-hidden="true"></span>Receipt ledger verified</span>
+    {% endif %}
+  </div>
+  <div class="cta">
+    <a class="btn" href="/playground">Try the API</a>
+    <a class="btn secondary" href="/calibration">View calibration</a>
+    <a class="btn secondary" href="/docs">Developer docs</a>
+  </div>
+</section>
+
+<section aria-labelledby="how">
+  <h2 id="how">How a decision is made</h2>
+  <div class="grid cols-3">
+    {% for title, desc in workflow %}
+    <div class="card"><h3>{{ loop.index }}. {{ title }}</h3><p class="small">{{ desc }}</p></div>
+    {% endfor %}
+  </div>
+</section>
+
+<section aria-labelledby="svc">
+  <h2 id="svc">Three paid services</h2>
+  <div class="grid cols-3">
+    {% for s in services %}
+    <div class="card">
+      <span class="tag {% if s.paid %}paid{% endif %}">{{ "Paid" if s.paid else "Free" }}</span>
+      <h3>{{ s.name }}</h3>
+      <p class="path">{{ s.method }} {{ s.path }}</p>
+      <p class="small">{{ s.blurb }}</p>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section aria-labelledby="live">
+  <h2 id="live">A live example verdict</h2>
+  {% if example %}
+  <p class="small muted">Pulled at request time from the current published opportunity scan — not hardcoded.</p>
+  <div class="grid cols-2">
+    <div class="card">
+      <span class="tag">{{ example.venue }} &middot; {{ example.family }}</span>
+      <h3>{{ example.question }}</h3>
+      <dl class="kv">
+        <dt>Oracle probability</dt><dd>{{ (example.oracle_prob*100)|round(1) }}%</dd>
+        {% if example.prob_low is not none and example.prob_high is not none %}
+        <dt>Uncertainty interval</dt><dd>{{ (example.prob_low*100)|round(1) }}% – {{ (example.prob_high*100)|round(1) }}%</dd>
+        {% endif %}
+        {% if example.confidence is not none %}<dt>Confidence</dt><dd>{{ (example.confidence*100)|round(0) }}%</dd>{% endif %}
+        <dt>Model version</dt><dd>{{ example.model_version }}</dd>
+        <dt>Market implied</dt><dd>{{ (example.implied_prob*100)|round(1) }}%</dd>
+        {% if example.side %}<dt>Side</dt><dd>{{ example.side }}</dd>{% endif %}
+        <dt>Actionable</dt><dd>{{ "Yes" if example.actionable else "No" }}</dd>
+      </dl>
+      <p class="small muted" style="margin-top:.75rem">{{ example.reason }}</p>
+    </div>
+    <div class="card">
+      <h3>Why — the explanation trace</h3>
+      {% if example.why and example.why.summary %}<p class="small">{{ example.why.summary }}</p>{% endif %}
+      {% if example.why and example.why.model_probabilities %}
+      <div class="table-scroll" style="margin-top:.5rem">
+        <table>
+          <caption class="small muted" style="text-align:left;padding:.4rem .8rem">Deterministic component estimates</caption>
+          <thead><tr><th scope="col">Model / source</th><th scope="col" class="num">Probability</th></tr></thead>
+          <tbody>
+          {% for name, prob in example.why.model_probabilities.items() %}
+            <tr><td>{{ name }}</td><td class="num">{{ (prob*100)|round(1) }}%</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="small muted">No component ensemble was exposed for this market; confidence rests on the engine's documented source path.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="note empty"><p>No priced market is available in the current scan snapshot. This is an honest
+  empty state — the site never fabricates a verdict. Check <a href="/status">status</a> for the latest scan.</p></div>
+  {% endif %}
+</section>
+
+<section aria-labelledby="cal">
+  <h2 id="cal">Calibration proof</h2>
+  {% if evidence.report_available %}
+  <div class="tiles">
+    <div class="tile"><div class="value tnum">{{ evidence.report.precommitted_forecasts }}</div><div class="label">Precommitted forecasts</div></div>
+    <div class="tile"><div class="value tnum">{{ evidence.report.resolved_forecasts }}</div><div class="label">Resolved</div></div>
+    <div class="tile"><div class="value tnum">{{ evidence.report.independent_resolved_event_groups }}</div><div class="label">Independent events</div></div>
+  </div>
+  <p><a href="/calibration">See the full calibration dashboard →</a></p>
+  {% else %}
+  <div class="note empty"><p><strong>Evidence is still accumulating.</strong> Promotion to higher confidence happens
+  only at fixed checkpoints and requires independent resolved events, a Brier-score bar, a maximum-calibration-gap
+  bar, and official-source concordance — none of which are claimed before they are earned.
+  <a href="/calibration">Track it here.</a></p></div>
+  {% endif %}
+</section>
+
+<section aria-labelledby="xv">
+  <h2 id="xv">Cross-venue equivalence</h2>
+  <p class="small">A price difference is only called an edge when the two contracts are provably the same event.
+  Classifications:</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Class</th><th scope="col">Meaning</th></tr></thead>
+      <tbody>
+      {% for name, meaning in equivalence %}
+        <tr><td><code>{{ name }}</code></td><td class="small">{{ meaning }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="note"><p class="small"><strong>Never risk-free.</strong> {{ cross_venue_risk }}</p></div>
+</section>
+
+<section aria-labelledby="law">
+  <h2 id="law">The Deterministic-Core Law</h2>
+  <div class="note law">
+    <ul class="law">
+      {% for item in law %}<li>{{ item }}</li>{% endfor %}
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="ev">
+  <h2 id="ev">Evidence, receipts &amp; the X Layer anchor</h2>
+  <p>Every priced or refused decision commits a receipt into an append-only, keccak256 hash-chained ledger,
+  linked by request id. Each record's chain hash makes after-the-fact rewriting detectable — including by the
+  builder. Anchoring the chain head on X Layer mainnet goes through the verified OKX Agentic Wallet path; the
+  local hash chain is always verifiable on its own. <a href="/receipts">Verify a receipt →</a></p>
+</section>
+
+<section aria-labelledby="exec">
+  <h2 id="exec">Execution boundary</h2>
+  <p>Execution is not the product. Funded trading is <strong>optional, gated, currently disabled, and
+  non-custodial</strong> — it stays off until the relevant calibration evidence gate passes. This phase
+  implements no authenticated order placement.</p>
+</section>
+
+<section aria-labelledby="dom">
+  <h2 id="dom">What is covered — honestly</h2>
+  <div class="grid cols-2">
+    <div class="card">
+      <h3>Supported</h3>
+      {% for name, desc, level in supported %}
+      <p class="small"><strong>{{ name }}</strong> — {{ desc }}</p>
+      {% endfor %}
+    </div>
+    <div class="card">
+      <h3>Deferred (fails closed)</h3>
+      {% for item in deferred %}<p class="small">— {{ item }}</p>{% endfor %}
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="dev">
+  <h2 id="dev">Build on it</h2>
+  <p>Discover the services, read the schemas, and call the API.</p>
+  <div class="cta">
+    <a class="btn" href="/docs">Read the docs</a>
+    <a class="btn secondary" href="{{ api_base }}/openapi.json">OpenAPI schema</a>
+  </div>
+</section>
+{% endblock %}

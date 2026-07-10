@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Terms{% endblock %}
+{% block description %}Terms of use for the Real-World Odds Oracle decision API.{% endblock %}
+
+{% block content %}
+<h1>Terms of use</h1>
+{% if not legal_entity %}
+<div class="note empty"><p><strong>Operator identity pending.</strong> These terms describe the service as built;
+the contracting legal entity will be named before public listing. Contact:
+<a href="mailto:{{ support_email }}">{{ support_email }}</a>.</p></div>
+{% else %}
+<p class="small muted">Provider: {{ legal_entity }} &middot; Contact: <a href="mailto:{{ support_email }}">{{ support_email }}</a>.</p>
+{% endif %}
+
+<h2>The service</h2>
+<ul class="small">
+  <li>The API returns an independent, deterministic probability estimate, an executable-price comparison, and a
+  tamper-evident receipt. <strong>No forecast is guaranteed to win; probabilities are estimates.</strong></li>
+  <li>The service is informational. It is not financial advice, not a custodial service, and it does not place
+  orders. Any trading decision and its risk are yours.</li>
+  <li>Cross-venue edges are never risk-free: fill, custody, venue, cancellation, and settlement risks remain.</li>
+</ul>
+
+<h2>Acceptable use</h2>
+<ul class="small">
+  <li>Call the API within its published rate limits and payment terms.</li>
+  <li>Do not attempt to bypass payment, replay payments, or misrepresent receipts.</li>
+</ul>
+
+<h2>No warranty</h2>
+<p class="small">The service is provided "as is," without warranty of any kind to the extent permitted by law.
+Sources may be delayed, incomplete, or unavailable; the service fails closed rather than fabricating data.</p>
+<p class="small muted">These terms will be finalized with the operator's legal identity before public listing.</p>
+{% endblock %}

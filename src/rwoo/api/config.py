@@ -46,6 +46,9 @@ class Settings:
     calibration_url: str = field(default_factory=lambda: _env("RWOO_CALIBRATION_URL", "http://localhost:8000/calibration"))
     receipts_url: str = field(default_factory=lambda: _env("RWOO_RECEIPTS_URL", "http://localhost:8000/receipts"))
     support_email: str = field(default_factory=lambda: _env("RWOO_SUPPORT_EMAIL", "support@example.invalid"))
+    # Legal identity for privacy/terms — an operator input; empty until supplied
+    # so the pages honestly show a pending state rather than inventing an entity.
+    legal_entity: str = field(default_factory=lambda: _env("RWOO_LEGAL_ENTITY", ""))
 
     # Security surfaces.
     allowed_origins: list[str] = field(default_factory=lambda: _env_list("RWOO_ALLOWED_ORIGINS", "http://localhost:8000"))

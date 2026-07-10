@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Status{% endblock %}
+{% block description %}Live service, source, and evidence status for the Real-World Odds Oracle.{% endblock %}
+
+{% block content %}
+<h1>Status</h1>
+<p class="lede">Read live at request time. The API's own <code>/healthz</code> and <code>/readyz</code> are the
+authoritative liveness/readiness signals; this page summarizes evidence and scan freshness.</p>
+
+<div class="tiles">
+  <div class="tile">
+    <div class="value">{% if evidence.decision_ledger.valid %}Valid{% else %}Invalid{% endif %}</div>
+    <div class="label">Decision receipt ledger</div>
+  </div>
+  <div class="tile">
+    <div class="value tnum">{{ evidence.decision_ledger.record_count if evidence.decision_ledger.record_count is defined else 0 }}</div>
+    <div class="label">Receipts committed</div>
+  </div>
+  <div class="tile">
+    <div class="value">{% if evidence.report_available %}Available{% else %}Accumulating{% endif %}</div>
+    <div class="label">Calibration report</div>
+  </div>
+  <div class="tile">
+    <div class="value">Disabled</div>
+    <div class="label">Funded execution</div>
+  </div>
+</div>
+
+<h2>Evidence</h2>
+<dl class="kv">
+  <dt>Calibration report</dt>
+  <dd>{% if evidence.report_available %}generated {{ evidence.report.created_at }}{% else %}not generated yet — accumulating{% endif %}</dd>
+  {% if evidence.report_available %}
+  <dt>Precommitted forecasts</dt><dd>{{ evidence.report.precommitted_forecasts }}</dd>
+  <dt>Resolved forecasts</dt><dd>{{ evidence.report.resolved_forecasts }}</dd>
+  <dt>Independent resolved events</dt><dd>{{ evidence.report.independent_resolved_event_groups }}</dd>
+  {% endif %}
+</dl>
+
+<h2>Latest opportunity scan</h2>
+{% if scan %}
+<dl class="kv">
+  <dt>Generated</dt><dd>{{ scan.created_at }}</dd>
+  <dt>Markets seen</dt><dd>{{ scan.markets_seen }}</dd>
+  <dt>Evaluated</dt><dd>{{ scan.markets_evaluated }}</dd>
+  <dt>Priced &amp; included</dt><dd>{{ scan.markets_included }}</dd>
+  <dt>Actionable</dt><dd>{{ scan.actionable_count }}</dd>
+</dl>
+{% else %}
+<div class="note empty"><p>No scan snapshot is currently published.</p></div>
+{% endif %}
+
+<p class="small muted">Machine-readable liveness: <a href="{{ api_base }}/healthz">{{ api_base }}/healthz</a>,
+readiness: <a href="{{ api_base }}/readyz">{{ api_base }}/readyz</a>, evidence:
+<a href="{{ api_base }}/v1/evidence/status">{{ api_base }}/v1/evidence/status</a>.</p>
+{% endblock %}

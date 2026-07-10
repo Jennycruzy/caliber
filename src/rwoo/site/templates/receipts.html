@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Receipts{% endblock %}
+{% block description %}Look up and verify a tamper-evident decision receipt against the append-only, hash-chained ledger.{% endblock %}
+
+{% block content %}
+<h1>Receipt verification</h1>
+<p class="lede">Every priced or refused decision commits a keccak256 record into an append-only, hash-chained
+ledger. Each record's chain hash makes after-the-fact rewriting detectable. Paste a receipt's
+<code>record_hash</code> to verify it against the live chain.</p>
+
+<p class="badges">
+  {% if ledger.valid %}
+  <span class="badge good"><span class="ic" aria-hidden="true"></span>Decision ledger verified — {{ ledger.record_count }} records</span>
+  {% else %}
+  <span class="badge crit"><span class="ic" aria-hidden="true"></span>Ledger verification failed: {{ ledger.reason }}</span>
+  {% endif %}
+  <span class="badge muted"><span class="ic" aria-hidden="true"></span>{{ ledger.hash_algorithm or "keccak256" }}</span>
+</p>
+
+<div class="card">
+  <form id="rx-form">
+    <label for="rh">record_hash</label>
+    <input id="rh" name="rh" placeholder="64-character hex hash" autocomplete="off" required
+           pattern="[0-9a-fA-F]{6,64}" title="hex characters only">
+    <div class="cta"><button class="btn" type="submit">Verify</button></div>
+  </form>
+  <div class="result" id="rx-status" role="status" aria-live="polite"></div>
+  <div id="rx-result"></div>
+</div>
+
+<h2>How verification works</h2>
+<ol class="small">
+  <li>Each record commits: request id, service, request hash, market/event ids, rule hash, model version, the
+  probability <em>or</em> refusal, interval, confidence, economics, why-summary, calibration scope, source
+  freshness, time, payment reference, previous hash, and chain hash.</li>
+  <li>Verifying recomputes every record hash and re-links the chain; any edit anywhere breaks the chain from
+  that point forward.</li>
+  <li>No private payment data is ever stored in a receipt.</li>
+</ol>
+
+<script>
+var API = {{ api_base | tojson }};
+document.getElementById('rx-form').addEventListener('submit', async function (e) {
+  e.preventDefault();
+  var hash = document.getElementById('rh').value.trim();
+  var statusEl = document.getElementById('rx-status');
+  var resultEl = document.getElementById('rx-result');
+  statusEl.textContent = 'Verifying…'; resultEl.innerHTML = '';
+  try {
+    var r = await fetch(API + '/v1/receipts/' + encodeURIComponent(hash) + '/verify');
+    var data = await r.json();
+    if (r.status === 200 && data.found) {
+      statusEl.innerHTML = '<span class="badge good"><span class="ic"></span>Found — sequence ' + data.sequence + ', ledger ' + (data.ledger_valid ? 'valid' : 'INVALID') + '</span>';
+    } else if (r.status === 404) {
+      statusEl.innerHTML = '<span class="badge warn"><span class="ic"></span>No receipt with that hash</span>';
+    } else {
+      statusEl.innerHTML = '<span class="badge crit"><span class="ic"></span>HTTP ' + r.status + '</span>';
+    }
+    var pre = document.createElement('pre'); pre.textContent = JSON.stringify(data, null, 2); resultEl.appendChild(pre);
+  } catch (err) {
+    statusEl.innerHTML = '<span class="badge crit"><span class="ic"></span>Could not reach the API</span>';
+  }
+});
+</script>
+{% endblock %}
