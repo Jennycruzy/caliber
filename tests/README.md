@@ -1,7 +1,7 @@
 # Tests
 
-Stdlib `unittest` — no third-party dependency (pytest is not installed in this
-environment). Run from the repo root:
+Stdlib `unittest` (pytest is not installed in this environment). Run from the
+repo root:
 
 ```
 python3 -m unittest discover
@@ -9,6 +9,12 @@ python3 -m unittest discover
 
 `tests/__init__.py` puts `src/` on `sys.path` (the same bootstrap `verify.py`
 uses), so `import rwoo...` works without installing the package.
+
+The core/parser tests have no third-party dependency. The HTTP-API tests
+(`test_api.py`, `test_payment.py`) exercise the ASP through Starlette's
+`TestClient` and therefore require `fastapi` (pinned in `requirements.txt`).
+They make **no network calls** — the market fetcher and evaluator are injected,
+and the payment settlement is a stub verifier that cannot run in production.
 
 ## Coverage
 

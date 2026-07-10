@@ -213,3 +213,37 @@ def fetch_canonical_markets_for_series_batch(
 
 def fetch_canonical_active_markets(max_markets: int = 500) -> list[CanonicalMarket]:
     return [market_row_to_canonical(m) for m in fetch_active_markets(max_markets=max_markets)]
+
+
+def fetch_market(ticker: str, client: httpx.Client | None = None) -> dict:
+    """Fetch a single Kalshi market row by its native ticker."""
+    own_client = client is None
+    client = client or httpx.Client(timeout=15)
+    try:
+        return _get_json(client, f"{BASE_URL}/markets/{ticker}").get("market", {})
+    finally:
+        if own_client:
+            client.close()
+
+
+def fetch_canonical_market(ticker: str, client: httpx.Client | None = None) -> CanonicalMarket | None:
+    """Single canonical market by ticker, enriched with the event's named
+    settlement source when the event lookup succeeds. Returns None when the
+    ticker resolves to no market."""
+    own_client = client is None
+    client = client or httpx.Client(timeout=15)
+    try:
+        market = fetch_market(ticker, client=client)
+        if not market:
+            return None
+        event_ticker = market.get("event_ticker")
+        if event_ticker:
+            try:
+                event = {"event": fetch_event(event_ticker, client=client)["event"]}
+                return to_canonical(event, market)
+            except Exception:  # event enrichment is best-effort; the row alone is still valid
+                pass
+        return market_row_to_canonical(market)
+    finally:
+        if own_client:
+            client.close()

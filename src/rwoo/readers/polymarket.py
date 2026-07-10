@@ -98,6 +98,33 @@ def fetch_canonical_markets(limit: int = 5, closed: bool = False, offset: int = 
     return [to_canonical(m) for m in fetch_markets(limit=limit, closed=closed, offset=offset)]
 
 
+def fetch_canonical_market(market_id: str, client: httpx.Client | None = None) -> CanonicalMarket | None:
+    """Single canonical market by Gamma id or condition id.
+
+    Gamma's `/markets/{id}` path takes the numeric id; a caller holding a
+    0x-prefixed condition id is matched through the `condition_ids` filter.
+    Returns None when nothing matches.
+    """
+    own_client = client is None
+    client = client or httpx.Client(timeout=15)
+    try:
+        if market_id.startswith("0x"):
+            resp = client.get(f"{GAMMA_BASE_URL}/markets", params={"condition_ids": market_id})
+            resp.raise_for_status()
+            rows = resp.json()
+            row = rows[0] if isinstance(rows, list) and rows else None
+        else:
+            resp = client.get(f"{GAMMA_BASE_URL}/markets/{market_id}")
+            resp.raise_for_status()
+            row = resp.json()
+            if isinstance(row, list):
+                row = row[0] if row else None
+        return to_canonical(row) if row else None
+    finally:
+        if own_client:
+            client.close()
+
+
 def fetch_canonical_active_markets(max_markets: int = 500, page_size: int = 100) -> list[CanonicalMarket]:
     out: list[CanonicalMarket] = []
     offset = 0

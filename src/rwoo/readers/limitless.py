@@ -258,3 +258,26 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
 
 def fetch_canonical_markets(active_limit: int = 100) -> list[CanonicalMarket]:
     return [to_canonical(row["market"], row.get("parent")) for row in fetch_scanner_markets(active_limit=active_limit)]
+
+
+def fetch_canonical_market(slug: str, client: httpx.Client | None = None) -> CanonicalMarket | None:
+    """Single canonical market by slug/id. Flattens a group parent to the child
+    whose identifier matches `slug` so the returned object prices one outcome,
+    not the group. Returns None when nothing matches."""
+    own_client = client is None
+    client = client or httpx.Client(timeout=20)
+    try:
+        raw = fetch_market(slug, client=client)
+        obj = raw.get("data", raw) if isinstance(raw, dict) else raw
+        if not isinstance(obj, dict) or not obj:
+            return None
+        children = obj.get("markets") or []
+        if children:
+            for child in children:
+                if slug in {str(child.get("conditionId")), str(child.get("id")), str(child.get("slug"))}:
+                    return to_canonical(child, obj)
+            return to_canonical(children[0], obj)
+        return to_canonical(obj)
+    finally:
+        if own_client:
+            client.close()
