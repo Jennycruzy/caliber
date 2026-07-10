@@ -73,8 +73,12 @@ gate uses explicit runtime controls where live APIs are slow or quota-limited:
   JSON/Markdown artifacts under `data/public/`. Weather/economics/sports
   markets without a matching engine are still included as explicit
   non-actionable records with family/shape/status fields. Unrelated
-  `other`/price-oracle noise remains skipped. No Limitless market is marked
-  actionable until exact venue fees/execution semantics are wired.
+  `other`/price-oracle noise remains skipped. Limitless taker fees are charged
+  as the conservative upper bound of the venue's official published buy-fee
+  table (an upper bound can only under-call an edge, never over-call it), so a
+  Limitless edge can qualify as actionable; the exact per-order fee is only
+  returned per executed order and is reconciled at execution time, not in the
+  scanner.
 
 ## Reproduce every claim
 
@@ -122,16 +126,22 @@ or a canned pass.
   - `economic_sources.py` — official Cleveland Fed nowcast and Philadelphia
     Fed SPF probability-distribution readers.
   - `engines/economics.py` — official-history baseline plus official
-    forward-looking Cleveland Fed/SPF inputs for core-CPI markets, and a BLS
-    CPI-U annual-history path for US headline-CPI annual bins.
+    forward-looking Cleveland Fed/SPF inputs for core-CPI markets, and BLS
+    CPI-U paths for US headline-CPI (monthly + annual) bins. Also prices
+    quarterly/annual GDP (Atlanta Fed GDPNow / Philadelphia Fed SPF),
+    unemployment (U-3) and payrolls (FRED), Fed target range (only when no
+    scheduled FOMC meeting remains before the target, else refuses), and
+    single-quarter real-GDP-decline recession markets (SPF RECESS anxious
+    index). NBER-style recession, non-US CPI, and PPI stay source_missing.
   - `engines/sports.py` — World Football Elo + official FIFA ranking baselines
     plus deterministic 48-team tournament simulators.
   - `edge.py` — Stage 3: edge = oracle_prob - implied_prob, qualified against
     the oracle's own uncertainty band, source freshness, source/model agreement,
     and real trading friction (Kalshi's published fee formula + the live
-    spread). Limitless spread is measured from public orderbook-like fields,
-    but actionable status is refused until exact fee calculation is integrated.
-    Refuses non-actionable edges.
+    spread). Limitless friction uses the live spread plus the conservative
+    upper bound of Limitless's official published taker buy-fee table, so a
+    Limitless edge is quantified and can be actionable; the exact per-order fee
+    is an execution-time reconciliation. Refuses non-actionable edges.
   - `calibration.py` — Brier score, reliability buckets, and transparent
     recalibration utilities.
   - `backtests/weather.py` — no-cap weather calibration backtest across all

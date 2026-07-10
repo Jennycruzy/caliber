@@ -260,5 +260,70 @@ class LimitlessTextEconomicsTests(unittest.TestCase):
         self.assertIsNone(parse_market(m))
 
 
+class RecessionTests(unittest.TestCase):
+    def test_single_quarter_gdp_decline_routes_to_engine(self):
+        m = make_market(
+            venue="limitless",
+            domain="economics",
+            question="Will real GDP decline in Q3 2026?",
+        )
+        parsed = parse_market(m)
+        self.assertEqual(parsed.family, "economics.recession")
+        self.assertEqual(parsed.shape, "quarterly_decline")
+        self.assertEqual(parsed.status, "engine_available")
+        self.assertEqual(parsed.country, "US")
+        self.assertEqual(parsed.source_series, "2026Q3")
+        self.assertEqual(parsed.target_year, 2026)
+
+    def test_nber_declaration_stays_source_missing(self):
+        # The live Polymarket 2026 recession market is NBER-shaped: no verified
+        # single-quarter probability source, so it must stay non-actionable.
+        m = make_market(
+            venue="polymarket",
+            domain="economics",
+            question="Will the US enter a recession in 2026?",
+            resolution_rule="Resolves YES if the NBER declares a recession beginning in 2026.",
+        )
+        parsed = parse_market(m)
+        self.assertEqual(parsed.family, "economics.recession")
+        self.assertEqual(parsed.shape, "nber_declaration")
+        self.assertEqual(parsed.status, "source_missing")
+
+    def test_two_consecutive_quarters_rule_stays_source_missing(self):
+        # A GDP-decline market with the informal two-quarter rule is NOT the
+        # single-quarter SPF RECESS shape, so it is not routed.
+        m = make_market(
+            venue="polymarket",
+            domain="economics",
+            question="Will GDP fall for two consecutive quarters in 2026?",
+        )
+        parsed = parse_market(m)
+        self.assertEqual(parsed.family, "economics.recession")
+        self.assertEqual(parsed.shape, "nber_declaration")
+        self.assertEqual(parsed.status, "source_missing")
+
+    def test_recession_without_quarter_stays_source_missing(self):
+        m = make_market(
+            venue="limitless",
+            domain="economics",
+            question="US Recession 2026?",
+        )
+        parsed = parse_market(m)
+        self.assertEqual(parsed.family, "economics.recession")
+        self.assertEqual(parsed.status, "source_missing")
+
+    def test_gdp_growth_bin_is_not_misread_as_recession(self):
+        # The positive-growth GDP bin shape must still route to the GDP engine,
+        # not the recession path.
+        m = make_market(
+            venue="limitless",
+            domain="economics",
+            question="US GDP growth in Q3 2026? - >=2.0%",
+        )
+        parsed = parse_market(m)
+        self.assertEqual(parsed.family, "economics.gdp")
+        self.assertEqual(parsed.status, "engine_available")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -142,11 +142,18 @@ def _economics_shape_from_text(text: str, venue: str) -> MarketCoverage:
             reason=f"{venue} Fed-rate market included; Fed-rate engine is not wired yet",
         )
     if "recession" in text:
+        # Recession-shaped markets are normally classified by
+        # parse_economics_market (single-quarter GDP-decline -> SPF RECESS
+        # engine; NBER/multi-quarter -> source_missing). This fallback only
+        # fires if that parser returned None on recession text.
         return MarketCoverage(
             family="economics.recession",
             shape="definition_trigger",
-            status="model_missing",
-            reason=f"{venue} recession market included; recession engine is not wired yet",
+            status="source_missing",
+            reason=(
+                f"{venue} recession market included; only a single-quarter real-GDP decline test "
+                "is priced (SPF RECESS), and this rule was not parsed into that shape"
+            ),
         )
     if "unemployment" in text or "jobs" in text or "payroll" in text:
         return MarketCoverage(

@@ -1,14 +1,16 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-10 (third session: parser tests, Phase 9 coverage gate,
-tennis/NBA sources, head-to-head YES-side binding)
+Last updated: 2026-07-10 (fourth session: recession-quarter routing wired +
+tested; third session: parser tests, Phase 9 coverage gate, tennis/NBA sources,
+head-to-head YES-side binding)
 
 ## 2026-07-10 Session — tests, Phase 9 gate, tennis/NBA, YES-binding
 
 Done this session (each verified live before commit):
 
 - Parser unit tests (closes Remaining item 1): the first tests in the repo —
-  stdlib `unittest`, run with `python3 -m unittest discover`. 68 offline tests
+  stdlib `unittest`, run with `PYTHONPATH=src python3 -m unittest discover`.
+  73 offline tests (as of the fourth session; +5 for recession routing)
   pin the family/shape/status contract of `parsers.py` across economics
   (Kalshi KXCPIYOY/KXECONSTATCPI/KXGDP/KXU3/KXPAYROLLS/KXFED and Limitless
   free-text CPI/GDP/Fed), World Cup stage titles, weather series/station
@@ -99,8 +101,9 @@ Done this session (each verified live before commit):
 
 Remaining (next session, in this order):
 
-1. ~~Unit tests for `parsers.py` shapes~~ — DONE 2026-07-10: 54 stdlib
-   unittest tests (`python3 -m unittest discover`); see this session's notes.
+1. ~~Unit tests for `parsers.py` shapes~~ — DONE 2026-07-10: stdlib unittest
+   tests (`PYTHONPATH=src python3 -m unittest discover`); see this session's
+   notes.
 2. ~~Phase 9 coverage gate in `verify.py`~~ — DONE 2026-07-10:
    `python3 verify.py --phase 9` passes. (Its tennis/NBA checks now assert the
    priced/deferred states, not the retired `source_missing` verdict.)
@@ -144,9 +147,18 @@ Remaining (next session, in this order):
    annual GDP SPF remains unchanged with only two walk-forward test groups.
 7. PPI engine: no open PPI markets existed on 2026-07-09 (KXUSPPI empty);
    add the BLS `wp` flat-file/API reader when live markets return.
-8. Recession routing: wire `compute_recession_quarter_probability` into the
-   scanner when a live market's rule is a decline-in-quarter test (the
-   Polymarket 2026-recession market is NBER-shaped -> stays source_missing).
+8. ~~Recession routing~~ — DONE 2026-07-10: `parse_economics_market` now
+   classifies recession-shaped economics markets. A single-quarter real-GDP
+   decline test with an explicit quarter (`economics.recession` /
+   `quarterly_decline`) routes to `compute_recession_quarter_probability` and
+   prices from the SPF RECESS anxious index (verified live end-to-end: Q4 2026
+   -> 0.245, Q1 2027 -> 0.257, confidence 0.60). NBER-style declarations,
+   multi-quarter ("two consecutive quarters") and year-level rules classify as
+   `nber_declaration` / `source_missing` and stay non-actionable — so the live
+   Polymarket 2026-recession market never enters the actionable set. Five
+   offline tests in `tests/test_parsers_economics.py` pin both paths. STILL
+   PENDING: a real live single-quarter-decline market to exercise the priced
+   path against an actual venue (none existed on 2026-07-10).
 9. Limitless daily weather markets: no qualifying live market existed on
    2026-07-09. DONE for the parser/engine boundary: Limitless and other venues
    can supply normalized metric/coordinates/timezone/date/strike/location and
@@ -350,10 +362,21 @@ weather/economics/sports shapes are included as non-actionable records instead
 of disappearing into skip counts.
 
 Why incomplete: no exchange credential flow, wallet approval flow, order
-placement API, max-size/risk-limit policy, or post-trade receipt is wired.
-Limitless specifically still needs exact fee calculation from its dynamic CLOB
-fee rules/profile fields before any Limitless edge can be actionable. The
+placement API, max-size/risk-limit policy, or post-trade receipt is wired. The
 scanner says what the engine would trade; it does not spend funds.
+
+Note on Limitless fees (corrected 2026-07-10): the scanner does NOT need the
+exact per-order fee to qualify a Limitless edge. `edge.py` already charges the
+conservative UPPER BOUND of Limitless's published taker buy-fee table with
+`missing_fee=False`, an upper bound can only under-call an edge (never over-call
+it), and Phase 8 asserts every priced Limitless record carries that quantified
+fee. Verified 2026-07-10 that a Limitless market with a clear edge returns
+`actionable=True` with a real fee term. The EXACT `effectiveFeeBps` is not
+exposed by any public read (the active-market `metadata.fee` field is a boolean
+flag, not a number; the docs state the exact fee is returned only per executed
+order), so exact fee reconciliation is an EXECUTION-phase concern — matching the
+fill's real fee against the bound in the post-trade receipt — not a scanner
+blocker.
 
 Completion criteria:
 
@@ -369,10 +392,12 @@ Current status: read-only scanned venue.
 What exists: `src/rwoo/readers/limitless.py` reads public active/search/detail
 market data, flattens grouped markets, maps `tradePrices` to bid/ask-like
 spread, records collateral/fee metadata in `raw`, and classifies Limitless
-markets into weather/economics/sports/other. Phase 8 now checks that Limitless
-was read live, grouped children were flattened, unsupported domain shapes were
-included as non-actionable records, and no Limitless record is actionable
-while the exact fee term is not computed.
+markets into weather/economics/sports/other. "Read-only" means no order
+placement is wired — the scanner CAN flag a Limitless edge as actionable.
+Phase 8 checks that Limitless was read live, grouped children were flattened,
+unsupported domain shapes were included as non-actionable records, and every
+priced Limitless record carries a QUANTIFIED fee term (the upper bound of the
+published buy-fee table; `fee > 0`, `fee_missing` retired).
 
 Known support boundary:
 
@@ -382,11 +407,12 @@ Known support boundary:
   date, metric, strike, and settlement source clearly enough to feed
   `engines/weather.py`.
 - Economics Limitless markets exist, including headline CPI, GDP, recession,
-  and Fed-rate shapes. The current engine now prices US annual headline-CPI
-  bins from official BLS all-items CPI-U history, but Limitless records remain
-  non-actionable until exact Limitless fees are wired. Non-US CPI sources,
-  monthly headline-CPI bins, GDP, Fed-rate, recession, and PPI markets still
-  need matching engines/sources.
+  and Fed-rate shapes. The engine prices US headline CPI (monthly + annual) and
+  quarterly/annual GDP; single-quarter GDP-decline recession markets now route
+  to the SPF RECESS engine (2026-07-10). These CAN be actionable — Limitless
+  fees are quantified as an upper bound (see the fee note above). Still needing
+  sources/engines: non-US CPI, Fed-rate decisions at scheduled meetings, and
+  PPI.
 - Sports Limitless markets are broad. The current supported sports engine is
   2026 FIFA World Cup national-team outright winner only. NBA/NHL/EPL/tennis,
   esports, props, stages, exact matchups, and player-stat markets need their
@@ -398,9 +424,20 @@ Completion criteria:
 - Exercise the normalized Limitless weather parser against a real live market
   once one exposes complete settlement fields; the parser and source-backed
   Phase 9 probes are already wired.
-- Add exact Limitless fee calculation from official fee/profile/order rules.
+- Reconcile the exact per-order fee against the upper-bound bound at EXECUTION
+  time (post-trade receipt), not in the scanner — the exact `effectiveFeeBps`
+  is only available per executed order; the ex-ante upper bound is sufficient
+  and already wired. Belongs to the funded-execution phase.
 - Add new deterministic economics/sports engines before widening Limitless
-  actionable support beyond US headline CPI and World Cup outright shapes.
+  actionable support (already covers US headline CPI, GDP, single-quarter
+  GDP-decline recession, and World Cup outright shapes).
+
+Verified 2026-07-10 (recorded here so it is not re-litigated): Limitless
+collateral is USDC on Base (token `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`,
+6 decimals) on the markets sampled live. This is a data point for the still-open
+OKX settlement-token question (USDT/USDG/USDC) — Limitless itself settles in
+USDC — but it does NOT resolve what OKX's Payment SDK settles in on X Layer;
+only a real funded call does.
 
 ### Broad venue coverage and engine expansion
 

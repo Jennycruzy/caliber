@@ -295,6 +295,15 @@ def _economics_engine_result(parsed) -> dict | None:
             cap_strike=parsed.cap_strike,
             target_date_iso=parsed.target_date,
         )
+    if (
+        parsed.family == "economics.recession"
+        and parsed.shape == "quarterly_decline"
+        and parsed.source_series
+    ):
+        return economics.compute_recession_quarter_probability(
+            int(parsed.source_series[:4]),
+            int(parsed.source_series[-1]),
+        )
     return None
 
 

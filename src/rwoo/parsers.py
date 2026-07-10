@@ -374,6 +374,38 @@ def parse_economics_market(market) -> ParsedMarket | None:
             settlement_source=market.resolution_source,
             raw={"question": market.question, "resolution_rule": market.resolution_rule},
         )
+    recession = _parse_recession(text)
+    if recession is not None:
+        shape, quarter_label = recession
+        if shape == "quarterly_decline" and quarter_label is not None:
+            return ParsedMarket(
+                domain="economics",
+                family="economics.recession",
+                shape=shape,
+                status="engine_available",
+                reason=(
+                    "single-quarter real-GDP decline market parsed into a target quarter; "
+                    "priced from the official Philadelphia Fed SPF RECESS anxious index"
+                ),
+                country="US",
+                target_year=int(quarter_label[:4]),
+                settlement_source=market.resolution_source,
+                source_series=quarter_label,
+                raw={"question": market.question, "resolution_rule": market.resolution_rule},
+            )
+        return ParsedMarket(
+            domain="economics",
+            family="economics.recession",
+            shape=shape,
+            status="source_missing",
+            reason=(
+                "recession market is parsed, but an NBER-style declaration (or a multi-quarter / "
+                "year-level rule) has no verified probability source in this build; only a "
+                "single-quarter real-GDP decline test can be priced from SPF RECESS"
+            ),
+            settlement_source=market.resolution_source,
+            raw={"question": market.question, "resolution_rule": market.resolution_rule},
+        )
     return None
 
 
@@ -560,6 +592,43 @@ def _is_fed_path_market(text: str) -> bool:
         or re.search(r"\bfomc\b", lowered)
         or re.search(r"\brate cuts? happen\b", lowered)
     )
+
+
+_GDP_DECLINE_RE = re.compile(
+    r"\b(?:real\s+)?gdp\b[^.?!]*\b(?:decline|declines|fall|falls|contract|contracts|shrink|shrinks|negative)\b"
+    r"|\b(?:decline|declines|fall|falls|contract|contracts|shrink|shrinks|negative)\b[^.?!]*\b(?:real\s+)?gdp\b",
+    re.IGNORECASE,
+)
+_TWO_QUARTER_RE = re.compile(
+    r"\b(?:two|2)\s+(?:consecutive|straight|successive)\s+quarters?\b", re.IGNORECASE
+)
+
+
+def _parse_recession(text: str) -> tuple[str, str | None] | None:
+    """Classify a recession-shaped economics market.
+
+    Returns ``(shape, quarter_label)`` or ``None`` when the text is not
+    recession-shaped. The only routable shape is ``"quarterly_decline"``: a
+    single-quarter real-GDP decline test with an explicit quarter, which the
+    official SPF RECESS anxious index prices directly. Everything else
+    (NBER-style declaration, multi-quarter or year-level rules) is
+    ``"nber_declaration"`` — recognized but with no verified probability source,
+    so it must stay non-actionable.
+    """
+    lowered = text.lower()
+    is_gdp_decline = bool(_GDP_DECLINE_RE.search(text))
+    if "recession" not in lowered and not is_gdp_decline:
+        return None
+    quarter_label = _quarter_from_text(text)
+    single_quarter_decline = (
+        is_gdp_decline
+        and quarter_label is not None
+        and "nber" not in lowered
+        and not _TWO_QUARTER_RE.search(text)
+    )
+    if single_quarter_decline:
+        return ("quarterly_decline", quarter_label)
+    return ("nber_declaration", None)
 
 
 def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMarket | None:
