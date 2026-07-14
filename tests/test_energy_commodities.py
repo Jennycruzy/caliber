@@ -7,6 +7,7 @@ from unittest.mock import patch
 from rwoo.engines.energy import backtest_henry_hub_annual_high, compute_henry_hub_annual_high_probability
 from rwoo.domain import classify_polymarket
 from rwoo.parsers import parse_market
+from rwoo.readers.kalshi import to_canonical
 from rwoo.scanner import _SCAN_SOURCE_CACHE, _expansion_series, _scan_source, scan_opportunities
 from tests.support import kalshi_raw, make_market
 
@@ -17,31 +18,58 @@ class EnergyEngineTests(unittest.TestCase):
         series = [(start + timedelta(days=i), 3.0 + ((i % 50) / 100)) for i in range(20 * 365)]
         target = (series[-1][0] + timedelta(days=60)).isoformat()
         result = compute_henry_hub_annual_high_probability(
-            "greater", 3.75, target, target_year=series[-1][0].year, series=series,
+            "greater", 3.75, target, target_year=series[-1][0].year,
+            issuance_date_iso=date(series[-1][0].year, 3, 11).isoformat(), series=series,
         )
         self.assertFalse(result["refused"])
         self.assertLessEqual(result["prob_low"], result["oracle_prob"])
         self.assertLessEqual(result["oracle_prob"], result["prob_high"])
 
-    def test_year_to_date_maximum_makes_already_hit_threshold_certain(self):
+    def test_post_issuance_maximum_makes_already_hit_threshold_certain(self):
         start = date(1997, 1, 1)
         series = [(start + timedelta(days=i), 3.0)
                   for i in range((date(2026, 7, 1) - start).days)]
         series.append((date(2026, 1, 23), 30.72))
         series.append((date(2026, 7, 1), 2.90))
         result = compute_henry_hub_annual_high_probability(
-            "greater", 10.0, "2027-01-01", target_year=2026, series=series,
+            "greater", 10.0, "2027-01-01", target_year=2026,
+            issuance_date_iso="2026-01-01", series=series,
         )
         self.assertEqual(result["oracle_prob"], 1.0)
-        self.assertEqual(result["per_source_values"]["year_to_date_maximum"], 30.72)
+        self.assertEqual(result["per_source_values"]["post_issuance_maximum"], 30.72)
         freshness = datetime.fromisoformat(result["data_freshness"])
         self.assertLess((datetime.now(timezone.utc) - freshness).total_seconds(), 5)
 
     def test_short_history_refuses(self):
         result = compute_henry_hub_annual_high_probability(
-            "greater", 4, "2027-01-01", series=[(date(2026, 1, 1), 3.0)],
+            "greater", 4, "2027-01-01", issuance_date_iso="2026-03-11",
+            series=[(date(2026, 1, 1), 3.0)],
         )
         self.assertTrue(result["refused"])
+
+    def test_pre_issuance_spike_does_not_make_contract_certain(self):
+        start = date(1997, 1, 1)
+        series = [(start + timedelta(days=i), 3.0 + ((i % 50) / 100))
+                  for i in range((date(2026, 7, 1) - start).days)]
+        series.append((date(2026, 1, 23), 30.72))
+        series.append((date(2026, 7, 1), 2.90))
+        result = compute_henry_hub_annual_high_probability(
+            "greater", 7.0, "2027-01-01", target_year=2026,
+            issuance_date_iso="2026-03-11T14:00:00Z", series=series,
+        )
+        self.assertFalse(result["refused"])
+        self.assertLess(result["oracle_prob"], 1.0)
+        self.assertLess(result["per_source_values"]["post_issuance_maximum"], 7.0)
+
+    def test_missing_issuance_timestamp_refuses(self):
+        start = date(1997, 1, 1)
+        series = [(start + timedelta(days=i), 3.0)
+                  for i in range((date(2026, 7, 1) - start).days)]
+        result = compute_henry_hub_annual_high_probability(
+            "greater", 7.0, "2027-01-01", target_year=2026, series=series,
+        )
+        self.assertTrue(result["refused"])
+        self.assertIn("issuance", result["reason"])
 
     def test_backtest_uses_independent_years_and_requires_market_benchmark(self):
         start = date(1997, 1, 1)
@@ -79,6 +107,23 @@ class EnergyEngineTests(unittest.TestCase):
 
 
 class CommodityParsingTests(unittest.TestCase):
+    def test_event_enrichment_does_not_reclassify_henry_hub_as_economics(self):
+        market = {
+            "ticker": "KXNGASMAX-26DEC31-P7.00",
+            "event_ticker": "KXNGASMAX-26DEC31",
+            "title": "Will natural gas get above $7?",
+            "rules_primary": "The Energy Information Administration reports the Henry Hub spot price after Issuance.",
+            "open_time": "2026-03-11T14:00:00Z",
+            "expiration_time": "2027-01-14T19:00:00Z",
+            "close_time": "2027-01-01T04:59:00Z",
+            "strike_type": "greater",
+            "floor_strike": 7.0,
+        }
+        event = {"event": {"category": "Economics", "settlement_sources": []}}
+        canonical = to_canonical(event, market)
+        self.assertEqual(canonical.domain, "commodities")
+        self.assertEqual(parse_market(canonical).family, "energy.henry_hub_spot")
+
     def test_scan_source_snapshot_loads_once(self):
         _SCAN_SOURCE_CACHE.clear()
         calls = []
@@ -89,7 +134,8 @@ class CommodityParsingTests(unittest.TestCase):
 
     def test_eia_henry_hub_contract_routes_to_engine(self):
         raw = kalshi_raw(series_ticker="KXNGASMAX", event_ticker="KXNGASMAX-26",
-                         strike_type="greater", floor_strike="5")
+                         strike_type="greater", floor_strike="5",
+                         open_time="2026-03-11T14:00:00Z")
         market = make_market(
             venue="kalshi", domain="commodities", question="Will Henry Hub natural gas exceed $5?",
             resolution_rule="The Energy Information Administration reports the Henry Hub spot price.",
@@ -99,10 +145,12 @@ class CommodityParsingTests(unittest.TestCase):
         self.assertEqual((parsed.family, parsed.status), ("energy.henry_hub_spot", "engine_available"))
         self.assertEqual(parsed.floor_strike, 5.0)
         self.assertEqual(parsed.target_year, 2026)
+        self.assertEqual(parsed.issuance_date, "2026-03-11T14:00:00Z")
 
     def test_dated_henry_hub_event_ticker_preserves_contract_year(self):
         raw = kalshi_raw(series_ticker="KXNGASMAX", event_ticker="KXNGASMAX-26DEC31",
-                         strike_type="greater", floor_strike="5")
+                         strike_type="greater", floor_strike="5",
+                         open_time="2026-03-11T14:00:00Z")
         market = make_market(
             venue="kalshi", domain="commodities", question="Will Henry Hub natural gas exceed $5?",
             resolution_rule="The Energy Information Administration reports the Henry Hub spot price.",

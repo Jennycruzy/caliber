@@ -1,5 +1,25 @@
 # Build Gaps And Sequencing
 
+## 2026-07-14 Henry Hub v3 settlement-window correction
+
+Kalshi's live `KXNGASMAX` rule counts EIA Henry Hub spot prices reported only
+after contract issuance. The prior v2 engine incorrectly checked the whole
+calendar year, so a January 2026 spike made March-issued contracts appear
+certain even though that observation preceded issuance.
+
+`henry-hub-post-issuance-annual-max-v3` now requires the venue open/issuance
+timestamp, excludes earlier observations, and fails closed when that timestamp
+is absent. Single-market Kalshi reads also preserve the explicit commodity
+series classification instead of inheriting the event's broad Economics label.
+
+Against the official DHHNGSP history through 2026-07-06, the current
+post-issuance maximum is $3.34/MMBtu. Corrected live probabilities range from
+0.87931 at the $4 threshold to 0.01724 at $7; none is forced to 1 by the
+pre-issuance January spike. The rolling post-issuance backtest spans 20
+independent years and 140 threshold rows: v3 Brier 0.08618 versus 0.23097 for
+the prior-year naive baseline. Closing-market history remains unavailable, so
+promotion remains false and v3 starts a new prospective evidence cohort.
+
 ## 2026-07-14 release-candidate audit
 
 The candidate was exercised on the VPS from

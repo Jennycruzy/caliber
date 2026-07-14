@@ -315,6 +315,7 @@ def evaluate_market(market) -> ScanRecord | None:
             engine_result = energy.compute_henry_hub_annual_high_probability(
                 parsed.strike_type or "", parsed.floor_strike, parsed.target_date,
                 target_year=parsed.target_year,
+                issuance_date_iso=parsed.issuance_date,
                 series=_scan_source("eia_dhhngsp", lambda: economic_sources.fetch_fred_series("DHHNGSP")),
             )
         else:

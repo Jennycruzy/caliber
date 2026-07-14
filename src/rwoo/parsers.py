@@ -27,6 +27,7 @@ class ParsedMarket:
     location: str | None = None
     country: str | None = None
     target_date: str | None = None
+    issuance_date: str | None = None
     target_month: int | None = None
     target_year: int | None = None
     timezone_name: str | None = None
@@ -280,11 +281,22 @@ def parse_commodity_market(market) -> ParsedMarket | None:
         event_ticker = str(row.get("event_ticker") or "")
         year_match = re.search(r"-(\d{2})(?:[A-Z]{3}\d{2})?(?:$|-)", event_ticker)
         target_year = 2000 + int(year_match.group(1)) if year_match else None
+        issuance_date = row.get("open_time") or row.get("created_time")
+        ready = (
+            strike_type == "greater"
+            and floor is not None
+            and issuance_date is not None
+        )
         return ParsedMarket(
             domain="commodities", family="energy.henry_hub_spot", shape="annual_high",
-            status="engine_available" if strike_type == "greater" and floor is not None else "parse_missing",
-            reason="EIA-resolved Henry Hub annual-high contract with structured threshold",
+            status="engine_available" if ready else "parse_missing",
+            reason=(
+                "EIA-resolved Henry Hub post-issuance annual-high contract with structured threshold"
+                if ready else
+                "Henry Hub contract requires a structured threshold and venue issuance/open timestamp"
+            ),
             target_date=market.trading_close_time or market.resolution_time,
+            issuance_date=str(issuance_date) if issuance_date is not None else None,
             target_year=target_year,
             metric="usd_per_mmbtu", strike_type=strike_type,
             floor_strike=float(floor) if floor is not None else None,

@@ -21,7 +21,7 @@ MODEL_VERSIONS = {
     "sports.mlb": "mlb-season-elo-v1",
     "sports.club_soccer": "clubelo-match-v1",
     "weather.hurricane_season": "noaa-seasonal-count-v2-update-aware",
-    "energy.henry_hub_spot": "henry-hub-seasonal-annual-max-v2",
+    "energy.henry_hub_spot": "henry-hub-post-issuance-annual-max-v3",
     "energy.commodity_price": "commodity-price-source-gated-v1",
     "agriculture.commodity_price": "agriculture-price-source-gated-v1",
 }

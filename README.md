@@ -185,10 +185,12 @@ treated as equivalent.
 
 `energy.henry_hub_spot` prices structured EIA-resolved calendar-year Henry Hub
 daily-maximum thresholds. It uses the EIA DHHNGSP series through FRED's public
-mirror, first checks the full contract-year observed maximum, and then compares
+mirror, first checks the post-issuance observed maximum, and then compares
 an unhit threshold with independent same-calendar-date historical remaining-year
-maximum ratios from full and recent official history. The corrected model is
-`henry-hub-seasonal-annual-max-v2`.
+maximum ratios from full and recent official history. Observations before the
+venue's issuance/open timestamp are excluded because the contract rule applies
+only after issuance. The corrected model is
+`henry-hub-post-issuance-annual-max-v3`.
 
 Other energy prices (`energy.commodity_price`) and agricultural prices
 (`agriculture.commodity_price`) are internal discovery telemetry, not advertised

@@ -181,7 +181,15 @@ def to_canonical(event: dict, market: dict) -> CanonicalMarket:
     implied_prob = (yes_bid + yes_ask) / 2
     spread = yes_ask - yes_bid
 
-    domain = classify_kalshi(ev.get("category"), market.get("title", ""))
+    series_ticker = market.get("series_ticker") or market.get("event_ticker", "").split("-", 1)[0]
+    # Explicit series routing wins over a broad event category. Kalshi places
+    # KXNGASMAX under an Economics event category even though it is a verified
+    # commodity-price series; using only the event category breaks single-market
+    # checks while the batch scanner (which already knows the series) succeeds.
+    domain = classify_kalshi(
+        _series_category(series_ticker) or ev.get("category"),
+        market.get("title", ""),
+    )
 
     return CanonicalMarket(
         venue="kalshi",

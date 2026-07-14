@@ -43,7 +43,8 @@ def _wilson_interval(hits: int, total: int, z: float = 1.96) -> tuple[float, flo
 
 def compute_henry_hub_annual_high_probability(
     strike_type: str, floor_strike: float | None, target_date_iso: str,
-    *, target_year: int | None = None, series: list[tuple[date, float]] | None = None,
+    *, target_year: int | None = None, issuance_date_iso: str | None = None,
+    series: list[tuple[date, float]] | None = None,
 ) -> dict:
     if strike_type != "greater" or floor_strike is None:
         return {"refused": True, "oracle_prob": None, "reason": "only annual-high greater-than contracts are supported"}
@@ -52,16 +53,28 @@ def compute_henry_hub_annual_high_probability(
     if len(series) < 750:
         return {"refused": True, "oracle_prob": None, "reason": f"insufficient Henry Hub daily history: {len(series)} rows"}
     target = date.fromisoformat(target_date_iso[:10])
+    if not issuance_date_iso:
+        return {"refused": True, "oracle_prob": None,
+                "reason": "contract issuance/open timestamp is required"}
+    issuance_date = date.fromisoformat(issuance_date_iso[:10])
     latest_date, current = series[-1]
     target_year = int(target_year or target.year)
+    if issuance_date.year != target_year:
+        return {"refused": True, "oracle_prob": None,
+                "reason": "contract issuance must fall within the contract year"}
     if latest_date.year != target_year:
         return {"refused": True, "oracle_prob": None, "reason": "annual-high model requires observations from the contract year"}
     if target <= latest_date:
         return {"refused": True, "oracle_prob": None, "reason": "target date is not after the latest source observation"}
-    year_to_date = [value for day, value in series if day.year == target_year and day <= latest_date]
-    if not year_to_date:
-        return {"refused": True, "oracle_prob": None, "reason": "no observations exist for the contract year"}
-    observed_max = max(year_to_date)
+    if issuance_date > latest_date:
+        return {"refused": True, "oracle_prob": None,
+                "reason": "no source observations exist on or after contract issuance"}
+    contract_to_date = [value for day, value in series
+                        if issuance_date <= day <= latest_date]
+    if not contract_to_date:
+        return {"refused": True, "oracle_prob": None,
+                "reason": "no observations exist in the post-issuance contract window"}
+    observed_max = max(contract_to_date)
     already_observed = observed_max > float(floor_strike)
     if already_observed:
         probability = 1.0
@@ -92,12 +105,13 @@ def compute_henry_hub_annual_high_probability(
         "per_source_values": {
             "source": "EIA Henry Hub spot price DHHNGSP via the Federal Reserve FRED mirror",
             "latest_observation": latest_date.isoformat(), "latest_price_usd_per_mmbtu": current,
-            "contract_year": target_year, "year_to_date_maximum": observed_max,
+            "contract_year": target_year, "issuance_date": issuance_date.isoformat(),
+            "post_issuance_maximum": observed_max,
             "threshold": float(floor_strike), "target_date": target.isoformat(),
             "history_start": series[0][0].isoformat(), "independent_analog_years": sample_count,
         },
         "method": (
-            "official daily Henry Hub history -> contract-year observed maximum, then independent "
+            "official daily Henry Hub history -> post-issuance observed maximum, then independent "
             "same-calendar-date historical remaining-year maximum ratios; full-history and recent-10-year views are averaged"
         ),
         # Once the barrier has been observed, later publication lag cannot
@@ -114,6 +128,7 @@ def compute_henry_hub_annual_high_probability(
 def backtest_henry_hub_annual_high(
     series: list[tuple[date, float]], *, thresholds: list[float],
     as_of_month: int = 7, as_of_day: int = 13,
+    issuance_month: int = 3, issuance_day: int = 11,
     closing_prices: dict[tuple[int, float], float] | None = None,
 ) -> dict:
     """Leakage-safe rolling-year validation of the annual-high engine.
@@ -129,15 +144,19 @@ def backtest_henry_hub_annual_high(
     for year in years:
         try:
             cutoff = date(year, as_of_month, as_of_day)
+            issuance = date(year, issuance_month, issuance_day)
         except ValueError:
             cutoff = date(year, 2, 28)
-        full_year = [value for day, value in series if day.year == year]
+            issuance = date(year, 3, 1)
+        contract_window = [value for day, value in series
+                           if issuance <= day <= date(year, 12, 31)]
         available = [(day, value) for day, value in series
                      if day.year < year or (day.year == year and day <= cutoff)]
-        if not full_year or not available or available[-1][0].year != year:
+        if not contract_window or not available or available[-1][0].year != year:
             continue
         prior_maxima = {
-            prior: max(value for day, value in series if day.year == prior)
+            prior: max(value for day, value in series
+                       if date(prior, issuance.month, issuance.day) <= day <= date(prior, 12, 31))
             for prior in years if prior < year
         }
         if len(prior_maxima) < 10:
@@ -145,11 +164,11 @@ def backtest_henry_hub_annual_high(
         for threshold in thresholds:
             result = compute_henry_hub_annual_high_probability(
                 "greater", float(threshold), date(year, 12, 31).isoformat(),
-                target_year=year, series=available,
+                target_year=year, issuance_date_iso=issuance.isoformat(), series=available,
             )
             if result.get("refused"):
                 continue
-            outcome = int(max(full_year) > float(threshold))
+            outcome = int(max(contract_window) > float(threshold))
             naive = sum(value > float(threshold) for value in prior_maxima.values()) / len(prior_maxima)
             market = closing_prices.get((year, float(threshold)))
             if market is not None and not 0 <= market <= 1:
@@ -166,7 +185,10 @@ def backtest_henry_hub_annual_high(
     market_rows = [row for row in rows if row["closing_market_probability"] is not None]
     market_brier = (sum((row["closing_market_probability"] - row["outcome"]) ** 2 for row in market_rows) / len(market_rows)) if market_rows else None
     return {
-        "method": "rolling independent calendar years; no evaluation-year future observations enter its forecast",
+        "method": (
+            "rolling independent post-issuance contract windows; no evaluation-year future "
+            "observations enter its forecast"
+        ),
         "independent_evaluation_years": len({row["year"] for row in rows}),
         "contract_rows": len(rows), "oracle_brier": oracle_brier,
         "naive_prior_year_brier": naive_brier,
