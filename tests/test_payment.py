@@ -279,8 +279,10 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertIn("message", body_schema["required"])
         self.assertEqual(body_schema["properties"]["limit"]["maximum"], 10)
         output_schema = discovery["schema"]["properties"]["output"]["properties"]["example"]
-        self.assertIn("request_id", output_schema["required"])
-        self.assertIn("signals", output_schema["properties"])
+        self.assertEqual(output_schema, {"type": "object"})
+        self.assertIn("signals", discovery["info"]["output"]["example"])
+        # Keep enough headroom for nginx and marketplace-client header limits.
+        self.assertLess(len(encoded), 8_000)
 
     def test_listing_probe_get_receives_challenge_before_business_logic(self):
         """The marketplace can probe and replay an identical body-free GET.

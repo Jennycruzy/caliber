@@ -305,8 +305,8 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
         gives them the exact body/query schema needed for the paid replay instead of forcing
         them to guess and receive a post-payment validation error.
         """
-        response_model, output_example = {
-            SIGNAL_SERVICE: (SignalResponse, {
+        output_example = {
+            SIGNAL_SERVICE: {
                 "request_id": "req_example",
                 "service": SIGNAL_SERVICE,
                 "status": "ok",
@@ -316,16 +316,16 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                 "filters": {},
                 "pagination": {},
                 "receipt": {"record_hash": "0" * 64},
-            }),
-            services.CHECK_MARKET_SERVICE: (CheckMarketResponse, {
+            },
+            services.CHECK_MARKET_SERVICE: {
                 "request_id": "req_example",
                 "service": services.CHECK_MARKET_SERVICE,
                 "status": "priced",
                 "created_at": "2026-07-14T00:00:00+00:00",
                 "market": {},
                 "receipt": {"record_hash": "0" * 64},
-            }),
-            services.CROSS_VENUE_SERVICE: (CrossVenueResponse, {
+            },
+            services.CROSS_VENUE_SERVICE: {
                 "request_id": "req_example",
                 "service": services.CROSS_VENUE_SERVICE,
                 "status": "evaluated",
@@ -335,9 +335,8 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                 "equivalence": {},
                 "actionable": False,
                 "receipt": {"record_hash": "0" * 64},
-            }),
+            },
         }[service]
-        output_schema = response_model.model_json_schema()
         if service == SIGNAL_SERVICE and method == "GET":
             input_info = {
                 "type": "http",
@@ -399,7 +398,11 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                         "type": "object",
                         "properties": {
                             "type": {"type": "string"},
-                            "example": output_schema,
+                            # Keep PAYMENT-REQUIRED compact enough for standard
+                            # reverse-proxy/client header limits. The concrete
+                            # deliverable example is above; only the request
+                            # schema must be exhaustive for paid replay.
+                            "example": {"type": "object"},
                         },
                         "required": ["type"],
                     },
