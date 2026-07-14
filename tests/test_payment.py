@@ -327,6 +327,77 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(query_schema["properties"]["limit"]["maximum"], 10)
         self.assertFalse(query_schema["additionalProperties"])
 
+    def test_settlement_timeout_poll_releases_paid_deliverable(self):
+        """A submitted transfer can confirm just after OKX's settle call times out.
+
+        The facilitator wrapper must expose get_settle_status so upstream x402
+        can confirm that transaction and return the buffered business response,
+        rather than charging the buyer and replying with an empty 402.
+        """
+        from x402.schemas import SettleResponse, SupportedKind, SupportedResponse, VerifyResponse
+
+        class TimeoutThenConfirmedFacilitator:
+            instance = None
+
+            def __init__(self, *args, **kwargs):
+                self.status_calls = 0
+                type(self).instance = self
+
+            def get_supported(self):
+                return SupportedResponse(kinds=[SupportedKind(
+                    x402_version=2, scheme="exact", network="eip155:196",
+                )])
+
+            async def verify(self, payload, requirements):
+                return VerifyResponse(isValid=True, payer="0x" + "1" * 40)
+
+            async def verify_signature(self, payload, requirements=None):
+                return VerifyResponse(isValid=True, payer="0x" + "1" * 40)
+
+            async def settle(self, payload, requirements):
+                return SettleResponse(
+                    success=True, status="timeout", payer="0x" + "1" * 40,
+                    transaction="0xabc", network="eip155:196",
+                )
+
+            async def get_settle_status(self, tx_hash):
+                self.status_calls += 1
+                return SettleResponse(
+                    success=True, status="success", payer="0x" + "1" * 40,
+                    transaction=tx_hash, network="eip155:196",
+                )
+
+        cfg = paid_config(
+            mode="facilitator", environment="production", network="eip155:196",
+            asset="0x779ded0c9e1022225f8e0630b35a9b54be713736",
+            asset_name="USD₮0", asset_version="1", asset_decimals=6,
+            recipient="0x38c3299ee0e771e8d0a756e1a5dd4b8a8e9930ca",
+            facilitator_url="https://web3.okx.com", okx_api_key="key",
+            okx_secret_key="secret", okx_passphrase="pass",
+        )
+        with patch("x402.http.OKXFacilitatorClient", TimeoutThenConfirmedFacilitator):
+            client = paid_client(tempfile.mkdtemp(), cfg)
+            unpaid = client.post("/v1/check-market", json=CHECK_BODY)
+            challenge = json.loads(base64.b64decode(unpaid.headers["PAYMENT-REQUIRED"]))
+            payload = {
+                "x402Version": 2,
+                "payload": {"authorization": {}},
+                "accepted": challenge["accepts"][0],
+                "resource": challenge["resource"],
+            }
+            payment_signature = base64.b64encode(
+                json.dumps(payload, separators=(",", ":")).encode()
+            ).decode()
+            paid = client.post(
+                "/v1/check-market", json=CHECK_BODY,
+                headers={"PAYMENT-SIGNATURE": payment_signature},
+            )
+
+        self.assertEqual(paid.status_code, 200)
+        self.assertEqual(paid.json()["status"], "priced")
+        self.assertIn("PAYMENT-RESPONSE", paid.headers)
+        self.assertEqual(TimeoutThenConfirmedFacilitator.instance.status_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

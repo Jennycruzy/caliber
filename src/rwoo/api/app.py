@@ -294,6 +294,18 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
             except OKXFacilitatorResponseError as exc:
                 raise self._normalized(exc) from exc
 
+        async def get_settle_status(self, tx_hash):
+            """Proxy timeout recovery required by the upstream x402 server.
+
+            OKX may submit the transfer successfully but initially return a timeout
+            while it waits for confirmation. The resource server then polls this
+            method before deciding whether to release the buffered deliverable.
+            """
+            try:
+                return await self._client.get_settle_status(tx_hash)
+            except OKXFacilitatorResponseError as exc:
+                raise self._normalized(exc) from exc
+
     facilitator = _SafeOKXFacilitator(raw_facilitator)
     server = x402ResourceServer(facilitator)
     server.register(config.network, ExactEvmScheme())
