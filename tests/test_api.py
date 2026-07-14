@@ -286,6 +286,8 @@ class OpsAndCalibrationTests(unittest.TestCase):
         data = client.get("/v1/supported-markets").json()
         self.assertEqual(set(data["venues"]), {"kalshi", "polymarket", "limitless"})
         self.assertIn("weather.temperature", data["families"])
+        self.assertNotIn("energy.commodity_price", data["families"])
+        self.assertNotIn("agriculture.commodity_price", data["families"])
         self.assertIn("sports.world_cup", data["sports_families_currently_producing_candidates"])
         coverage = {row["family"]: row for row in data["sports_coverage"]}
         self.assertEqual(coverage["sports.world_cup"]["availability"], "live_signal_candidate")
@@ -294,7 +296,14 @@ class OpsAndCalibrationTests(unittest.TestCase):
         expansion = {row["family"]: row for row in data["expanded_market_coverage"]}
         self.assertEqual(expansion["weather.hurricane_season"]["availability"], "live_signal_candidate")
         self.assertEqual(expansion["energy.henry_hub_spot"]["availability"], "live_signal_candidate")
-        self.assertEqual(expansion["agriculture.commodity_price"]["availability"], "source_gated")
+        self.assertNotIn("agriculture.commodity_price", expansion)
+        telemetry = data["internal_discovery_telemetry"]
+        self.assertTrue(telemetry["not_product_capabilities"])
+        internal = {row["family"]: row for row in telemetry["coverage"]}
+        self.assertEqual(
+            internal["agriculture.commodity_price"]["availability"],
+            "exact_settlement_source_not_integrated",
+        )
 
     def test_calibration_empty_state_is_honest(self):
         client, _ = client_for(self.tmp)  # report file does not exist

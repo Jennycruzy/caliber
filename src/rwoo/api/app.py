@@ -53,7 +53,11 @@ from rwoo.api.schemas import (
 from rwoo.api import services
 from rwoo.api.signals import SERVICE as SIGNAL_SERVICE, rank_signals
 from rwoo.identity import MODEL_VERSIONS
-from rwoo.expansion_coverage import EXPANSION_COVERAGE, expansion_scan_summary
+from rwoo.expansion_coverage import (
+    ACTIVE_EXPANSION_COVERAGE,
+    INTERNAL_DISCOVERY_COVERAGE,
+    expansion_scan_summary,
+)
 from rwoo.scanner import ECONOMICS_SERIES, SPORTS_SERIES, WEATHER_SERIES, evaluate_market
 from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
 
@@ -608,15 +612,23 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
     @app.get("/v1/supported-markets", tags=["ops"], summary="Coverage: venues, families, series")
     async def supported_markets():
         scan = services.load_json_artifact(settings.opportunity_scan_path)
+        public_families = {
+            family: version for family, version in MODEL_VERSIONS.items()
+            if family not in {"energy.commodity_price", "agriculture.commodity_price"}
+        }
         return {
             "venues": list(SUPPORTED_VENUES),
             "registered_model_families": sorted(MODEL_VERSIONS.keys()),
-            "families": sorted(MODEL_VERSIONS.keys()),
-            "model_versions": MODEL_VERSIONS,
+            "families": sorted(public_families.keys()),
+            "model_versions": public_families,
             "sports_families_currently_producing_candidates": ["sports.world_cup"],
             "sports_coverage": SPORTS_COVERAGE,
             "current_sports_scan": sports_scan_summary(scan),
-            "expanded_market_coverage": EXPANSION_COVERAGE,
+            "expanded_market_coverage": ACTIVE_EXPANSION_COVERAGE,
+            "internal_discovery_telemetry": {
+                "not_product_capabilities": True,
+                "coverage": INTERNAL_DISCOVERY_COVERAGE,
+            },
             "current_expansion_scan": expansion_scan_summary(scan),
             "kalshi_series": {
                 "weather": WEATHER_SERIES,
@@ -624,7 +636,7 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
                 "sports": SPORTS_SERIES,
                 "expansion": (scan or {}).get("dynamically_discovered_expansion_series", []),
             },
-            "note": "Registered model families are not a promise of a current signal. Expansion series are discovered from venue settlement metadata on every scan; unsupported or unbindable markets fail closed, never to a silent zero.",
+            "note": "Families lists active public coverage. Internal discovery telemetry is measured for research only and is not a product capability until its exact settlement source is integrated.",
         }
 
     @app.get("/v1/evidence/status", tags=["ops"], summary="Evidence ledger + calibration status")

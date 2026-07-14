@@ -29,7 +29,7 @@ EXPANSION_COVERAGE = [
     {
         "market": "Other energy prices",
         "family": "energy.commodity_price",
-        "availability": "source_gated",
+        "availability": "exact_settlement_source_not_integrated",
         "market_shapes": [],
         "model_version": MODEL_VERSIONS["energy.commodity_price"],
         "data_sources": [],
@@ -38,12 +38,22 @@ EXPANSION_COVERAGE = [
     {
         "market": "Agriculture prices and reports",
         "family": "agriculture.commodity_price",
-        "availability": "source_gated",
+        "availability": "exact_settlement_source_not_integrated",
         "market_shapes": [],
         "model_version": MODEL_VERSIONS["agriculture.commodity_price"],
         "data_sources": [],
         "limitations": "Corn, wheat, soybeans, cattle, coffee, cocoa, and sugar are classified but not priced without the contract's exact approved feed. A USDA model is activated only for a verified recurring open USDA-resolved contract shape.",
     },
+]
+
+ACTIVE_EXPANSION_COVERAGE = [
+    item for item in EXPANSION_COVERAGE
+    if item["availability"] == "live_signal_candidate"
+]
+
+INTERNAL_DISCOVERY_COVERAGE = [
+    item for item in EXPANSION_COVERAGE
+    if item["availability"] == "exact_settlement_source_not_integrated"
 ]
 
 
