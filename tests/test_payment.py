@@ -13,6 +13,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,9 +39,9 @@ def paid_config(**overrides) -> PaymentConfig:
     return PaymentConfig(**base)
 
 
-def paid_client(tmp, config=None):
+def paid_client(tmp, config=None, *, settings=None):
     config = config or paid_config()
-    settings = make_settings(tmp)
+    settings = settings or make_settings(tmp)
     app = create_app(
         settings,
         fetch_market=lambda v, m: a_market(v, m),
@@ -189,6 +190,21 @@ class PaidCallTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.json()["receipt"]["record_hash"], second.json()["receipt"]["record_hash"])
 
+    def test_paid_idempotency_cache_is_bound_to_payment_credential(self):
+        first_header = x_payment(self.config, self.req_hash, nonce="credential-one")
+        headers = {pay.X_PAYMENT_HEADER: first_header, "Idempotency-Key": "credential-bound"}
+        first = self.client.post("/v1/check-market", json=CHECK_BODY, headers=headers)
+        self.assertEqual(first.status_code, 200)
+
+        different_header = x_payment(self.config, self.req_hash, nonce="credential-two")
+        changed = self.client.post(
+            "/v1/check-market",
+            json=CHECK_BODY,
+            headers={pay.X_PAYMENT_HEADER: different_header, "Idempotency-Key": "credential-bound"},
+        )
+        self.assertEqual(changed.status_code, 409)
+        self.assertEqual(changed.json()["error"]["code"], "IDEMPOTENCY_CONFLICT")
+
     def _bad_header(self, **outer):
         inner = {
             "stub_authorized": True, "payTo": self.config.recipient, "asset": self.config.asset,
@@ -246,18 +262,45 @@ class ProductionSafetyTests(unittest.TestCase):
             facilitator_url="https://web3.okx.com", okx_api_key="key",
             okx_secret_key="secret", okx_passphrase="pass", max_timeout_seconds=60,
         )
+        tmp = tempfile.mkdtemp()
+        scan_path = Path(tmp) / "scan.json"
+        scan_path.write_text(json.dumps({
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "top": [
+                {"venue": "polymarket", "market_id": "0xcurrent-poly",
+                 "market_status": "active", "coverage_status": "actionable"},
+                {"venue": "kalshi", "market_id": "KX-CURRENT",
+                 "market_status": "open", "coverage_status": "actionable"},
+            ],
+        }), encoding="utf-8")
+        settings = make_settings(tmp, opportunity_scan_path=scan_path)
         with patch("x402.http.OKXFacilitatorClient", FakeFacilitator):
-            client = paid_client(tempfile.mkdtemp(), cfg)
+            client = paid_client(tmp, cfg, settings=settings)
             response = client.post("/v1/signals", json={"message": "Give me the best signals"})
+            check_market_response = client.post(
+                "/v1/check-market",
+                json={"market": {"venue": "polymarket", "market_id": "fed-decision-in-october"}},
+            )
+            cross_venue_response = client.post(
+                "/v1/cross-venue-edge",
+                json={
+                    "left": {"venue": "kalshi", "market_id": "KX-EXACT"},
+                    "right": {"venue": "polymarket", "market_id": "0xabc"},
+                },
+            )
             guessed_body_response = client.post(
                 "/v1/signals", json={"query": "Show calibration"},
             )
+            guessed_check_response = client.post("/v1/check-market", json={"market": "wrong"})
+            guessed_cross_response = client.post("/v1/cross-venue-edge", json={"markets": []})
 
         self.assertEqual(response.status_code, 402)
         # Payment interception precedes FastAPI body validation. A marketplace
         # probe that guessed the body must still receive the discoverable 402,
         # not the business-layer 400 observed during the failed review.
         self.assertEqual(guessed_body_response.status_code, 402)
+        self.assertEqual(guessed_check_response.status_code, 402)
+        self.assertEqual(guessed_cross_response.status_code, 402)
         self.assertIn("PAYMENT-REQUIRED", guessed_body_response.headers)
         encoded = response.headers.get("PAYMENT-REQUIRED")
         self.assertIsNotNone(encoded)
@@ -282,7 +325,59 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(output_schema, {"type": "object"})
         self.assertIn("signals", discovery["info"]["output"]["example"])
         # Keep enough headroom for nginx and marketplace-client header limits.
-        self.assertLess(len(encoded), 8_000)
+        self.assertLess(len(encoded), 3_500)
+
+        # The protected check-market route advertises the nested object shape
+        # in the 402 itself, before a buyer pays or probes validation errors.
+        check_encoded = check_market_response.headers.get("PAYMENT-REQUIRED")
+        self.assertIsNotNone(check_encoded)
+        check_challenge = json.loads(base64.b64decode(check_encoded))
+        check_discovery = check_challenge["extensions"]["bazaar"]
+        check_info = check_discovery["info"]["input"]
+        self.assertEqual(check_info["body"], {
+            "market": {"venue": "polymarket", "market_id": "0xcurrent-poly"},
+            "include": {"why_trace": True, "calibration": True, "receipt": True},
+        })
+        check_schema = check_discovery["schema"]["properties"]["input"]["properties"]["body"]
+        self.assertIn("market", check_schema["required"])
+        market_ref = check_schema["properties"]["market"]
+        self.assertEqual(set(market_ref["required"]), {"venue", "market_id"})
+        self.assertIn("single-market event slug", market_ref["properties"]["market_id"]["description"])
+        self.assertLess(len(check_encoded), 3_500)
+
+        cross_encoded = cross_venue_response.headers.get("PAYMENT-REQUIRED")
+        self.assertIsNotNone(cross_encoded)
+        cross_challenge = json.loads(base64.b64decode(cross_encoded))
+        cross_schema = cross_challenge["extensions"]["bazaar"]["schema"]["properties"]["input"]["properties"]["body"]
+        self.assertEqual(set(cross_schema["required"]), {"left", "right"})
+        venue_ref = cross_schema["properties"]["left"]
+        self.assertEqual(set(venue_ref["required"]), {"venue", "market_id"})
+        cross_info = cross_challenge["extensions"]["bazaar"]["info"]["input"]
+        self.assertEqual(cross_info["body"]["left"], {
+            "venue": "polymarket", "market_id": "0xcurrent-poly",
+        })
+        self.assertEqual(cross_info["body"]["right"], {
+            "venue": "kalshi", "market_id": "KX-CURRENT",
+        })
+        self.assertLess(len(cross_encoded), 3_500)
+
+    def test_paid_best_signals_readiness_requires_a_fresh_scan(self):
+        tmp = tempfile.mkdtemp()
+        missing_scan = Path(tmp) / "missing.json"
+        settings = make_settings(tmp, opportunity_scan_path=missing_scan)
+        client = paid_client(tmp, settings=settings)
+        response = client.get("/readyz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "degraded")
+        self.assertFalse(response.json()["checks"]["paid_signal_scan"]["ok"])
+
+        scan_path = Path(tmp) / "fresh.json"
+        scan_path.write_text(json.dumps({
+            "created_at": datetime.now(timezone.utc).isoformat(), "top": [],
+        }), encoding="utf-8")
+        fresh_settings = make_settings(tmp, opportunity_scan_path=scan_path)
+        fresh_client = paid_client(tmp, settings=fresh_settings)
+        self.assertEqual(fresh_client.get("/readyz").status_code, 200)
 
     def test_listing_probe_get_receives_challenge_before_business_logic(self):
         """The marketplace can probe and replay an identical body-free GET.
@@ -397,6 +492,75 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(paid.json()["status"], "priced")
         self.assertIn("PAYMENT-RESPONSE", paid.headers)
         self.assertEqual(TimeoutThenConfirmedFacilitator.instance.status_calls, 1)
+
+    def test_production_idempotency_replay_settles_only_once(self):
+        from x402.schemas import SettleResponse, SupportedKind, SupportedResponse, VerifyResponse
+
+        class CountingFacilitator:
+            instance = None
+
+            def __init__(self, *args, **kwargs):
+                self.verify_calls = 0
+                self.settle_calls = 0
+                type(self).instance = self
+
+            def get_supported(self):
+                return SupportedResponse(kinds=[SupportedKind(
+                    x402_version=2, scheme="exact", network="eip155:196",
+                )])
+
+            async def verify(self, payload, requirements):
+                self.verify_calls += 1
+                return VerifyResponse(isValid=True, payer="0x" + "1" * 40)
+
+            async def verify_signature(self, payload, requirements=None):
+                self.verify_calls += 1
+                return VerifyResponse(isValid=True, payer="0x" + "1" * 40)
+
+            async def settle(self, payload, requirements):
+                self.settle_calls += 1
+                return SettleResponse(
+                    success=True, status="success", payer="0x" + "1" * 40,
+                    transaction="0xpaid", network="eip155:196",
+                )
+
+            async def get_settle_status(self, tx_hash):
+                raise AssertionError("successful settlement must not poll")
+
+        cfg = paid_config(
+            mode="facilitator", environment="production", network="eip155:196",
+            asset="0x779ded0c9e1022225f8e0630b35a9b54be713736",
+            asset_name="USD₮0", asset_version="1", asset_decimals=6,
+            recipient="0x38c3299ee0e771e8d0a756e1a5dd4b8a8e9930ca",
+            facilitator_url="https://web3.okx.com", okx_api_key="key",
+            okx_secret_key="secret", okx_passphrase="pass",
+        )
+        with patch("x402.http.OKXFacilitatorClient", CountingFacilitator):
+            client = paid_client(tempfile.mkdtemp(), cfg)
+            unpaid = client.post("/v1/check-market", json=CHECK_BODY)
+            challenge = json.loads(base64.b64decode(unpaid.headers["PAYMENT-REQUIRED"]))
+            payload = {
+                "x402Version": 2,
+                "payload": {"authorization": {}},
+                "accepted": challenge["accepts"][0],
+                "resource": challenge["resource"],
+            }
+            signature = base64.b64encode(
+                json.dumps(payload, separators=(",", ":")).encode()
+            ).decode()
+            headers = {
+                "PAYMENT-SIGNATURE": signature,
+                "Idempotency-Key": "production-once",
+            }
+            first = client.post("/v1/check-market", json=CHECK_BODY, headers=headers)
+            second = client.post("/v1/check-market", json=CHECK_BODY, headers=headers)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.headers["X-Idempotent-Replay"], "true")
+        self.assertEqual(first.json()["receipt"], second.json()["receipt"])
+        self.assertEqual(CountingFacilitator.instance.verify_calls, 1)
+        self.assertEqual(CountingFacilitator.instance.settle_calls, 1)
 
 
 if __name__ == "__main__":

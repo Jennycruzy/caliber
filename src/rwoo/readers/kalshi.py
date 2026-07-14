@@ -5,11 +5,13 @@ all verified live against the real API; see docs/VERIFICATION_LEDGER.md §2.
 """
 import time
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
 from rwoo.domain import classify_kalshi
 from rwoo.models import CanonicalMarket
+from rwoo.readers.errors import ExecutableQuoteUnavailable
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
@@ -58,7 +60,7 @@ def fetch_event(event_ticker: str, client: httpx.Client | None = None) -> dict:
     own_client = client is None
     client = client or httpx.Client(timeout=15)
     try:
-        return _get_json(client, f"{BASE_URL}/events/{event_ticker}")
+        return _get_json(client, f"{BASE_URL}/events/{quote(str(event_ticker), safe='')}")
     finally:
         if own_client:
             client.close()
@@ -98,7 +100,7 @@ def fetch_market(market_id: str, client: httpx.Client | None = None) -> dict:
     own_client = client is None
     client = client or httpx.Client(timeout=15)
     try:
-        data = _get_json(client, f"{BASE_URL}/markets/{market_id}")
+        data = _get_json(client, f"{BASE_URL}/markets/{quote(str(market_id), safe='')}")
         return data.get("market", data)
     finally:
         if own_client:
@@ -111,7 +113,7 @@ def fetch_orderbook(market_id: str, *, depth: int = 1,
     client = client or httpx.Client(timeout=15)
     try:
         data = _get_json(
-            client, f"{BASE_URL}/markets/{market_id}/orderbook",
+            client, f"{BASE_URL}/markets/{quote(str(market_id), safe='')}/orderbook",
             {"depth": max(1, min(depth, 100))},
         )
         return data.get("orderbook_fp") or data.get("orderbook") or {}
@@ -169,15 +171,37 @@ def _series_category(series_ticker: str) -> str | None:
     return None
 
 
-def to_canonical(event: dict, market: dict) -> CanonicalMarket:
+def _bid_ask(market: dict, *, require_executable_quotes: bool) -> tuple[float, float]:
+    bid_raw = market.get("yes_bid_dollars")
+    ask_raw = market.get("yes_ask_dollars")
+    if require_executable_quotes and (bid_raw in (None, "") or ask_raw in (None, "")):
+        raise ExecutableQuoteUnavailable(
+            "kalshi", str(market.get("ticker") or ""),
+            "Kalshi response did not include both yes_bid_dollars and yes_ask_dollars",
+        )
+    yes_bid = float(bid_raw or 0)
+    yes_ask = float(ask_raw or 0)
+    if not (0 <= yes_bid <= yes_ask <= 1):
+        raise ExecutableQuoteUnavailable(
+            "kalshi", str(market.get("ticker") or ""),
+            "Kalshi returned an invalid or crossed yes bid/ask pair",
+        )
+    return yes_bid, yes_ask
+
+
+def to_canonical(
+    event: dict,
+    market: dict,
+    *,
+    require_executable_quotes: bool = False,
+) -> CanonicalMarket:
     ev = event["event"]
     settlement_sources = ev.get("settlement_sources") or []
     resolution_source = ", ".join(
         f"{s.get('name')} ({s.get('url')})" for s in settlement_sources
     ) or "not specified in event metadata"
 
-    yes_bid = float(market.get("yes_bid_dollars", 0) or 0)
-    yes_ask = float(market.get("yes_ask_dollars", 0) or 0)
+    yes_bid, yes_ask = _bid_ask(market, require_executable_quotes=require_executable_quotes)
     implied_prob = (yes_bid + yes_ask) / 2
     spread = yes_ask - yes_bid
 
@@ -209,11 +233,14 @@ def to_canonical(event: dict, market: dict) -> CanonicalMarket:
     )
 
 
-def market_row_to_canonical(market: dict) -> CanonicalMarket:
+def market_row_to_canonical(
+    market: dict,
+    *,
+    require_executable_quotes: bool = False,
+) -> CanonicalMarket:
     series_ticker = market.get("series_ticker") or market.get("event_ticker", "").split("-", 1)[0]
     category = _series_category(series_ticker)
-    yes_bid = float(market.get("yes_bid_dollars", 0) or 0)
-    yes_ask = float(market.get("yes_ask_dollars", 0) or 0)
+    yes_bid, yes_ask = _bid_ask(market, require_executable_quotes=require_executable_quotes)
     implied_prob = (yes_bid + yes_ask) / 2
     spread = yes_ask - yes_bid
     title = market.get("title", "")
@@ -236,14 +263,16 @@ def market_row_to_canonical(market: dict) -> CanonicalMarket:
     )
 
 
-def fetch_canonical_market(market_id: str, client: httpx.Client | None = None) -> CanonicalMarket:
-    return market_row_to_canonical(fetch_market(market_id, client=client))
-
-
 def fetch_markets_for_event(event_ticker: str, client: httpx.Client | None = None) -> list[CanonicalMarket]:
     data = fetch_event(event_ticker, client=client)
     event = {"event": data["event"]}
-    return [to_canonical(event, m) for m in data.get("markets", [])]
+    out: list[CanonicalMarket] = []
+    for market in data.get("markets", []):
+        try:
+            out.append(to_canonical(event, market))
+        except ExecutableQuoteUnavailable:
+            continue
+    return out
 
 
 def fetch_canonical_markets_for_series(
@@ -251,7 +280,13 @@ def fetch_canonical_markets_for_series(
     limit: int = 100,
     client: httpx.Client | None = None,
 ) -> list[CanonicalMarket]:
-    return [market_row_to_canonical(m) for m in fetch_markets(series_ticker, limit=limit, client=client)]
+    out: list[CanonicalMarket] = []
+    for market in fetch_markets(series_ticker, limit=limit, client=client):
+        try:
+            out.append(market_row_to_canonical(market))
+        except ExecutableQuoteUnavailable:
+            continue
+    return out
 
 
 def fetch_canonical_markets_for_series_batch(
@@ -265,24 +300,23 @@ def fetch_canonical_markets_for_series_batch(
     with httpx.Client(timeout=20) as client:
         for series_ticker in series_tickers:
             rows = fetch_markets(series_ticker, limit=limit, status=status, client=client)
-            out.extend(market_row_to_canonical(m) for m in rows)
+            for market in rows:
+                try:
+                    out.append(market_row_to_canonical(market))
+                except ExecutableQuoteUnavailable:
+                    continue
             time.sleep(0.25)
     return out
 
 
 def fetch_canonical_active_markets(max_markets: int = 500) -> list[CanonicalMarket]:
-    return [market_row_to_canonical(m) for m in fetch_active_markets(max_markets=max_markets)]
-
-
-def fetch_market(ticker: str, client: httpx.Client | None = None) -> dict:
-    """Fetch a single Kalshi market row by its native ticker."""
-    own_client = client is None
-    client = client or httpx.Client(timeout=15)
-    try:
-        return _get_json(client, f"{BASE_URL}/markets/{ticker}").get("market", {})
-    finally:
-        if own_client:
-            client.close()
+    out: list[CanonicalMarket] = []
+    for market in fetch_active_markets(max_markets=max_markets):
+        try:
+            out.append(market_row_to_canonical(market))
+        except ExecutableQuoteUnavailable:
+            continue
+    return out
 
 
 def fetch_canonical_market(ticker: str, client: httpx.Client | None = None) -> CanonicalMarket | None:
@@ -299,10 +333,10 @@ def fetch_canonical_market(ticker: str, client: httpx.Client | None = None) -> C
         if event_ticker:
             try:
                 event = {"event": fetch_event(event_ticker, client=client)["event"]}
-                return to_canonical(event, market)
+                return to_canonical(event, market, require_executable_quotes=True)
             except Exception:  # event enrichment is best-effort; the row alone is still valid
                 pass
-        return market_row_to_canonical(market)
+        return market_row_to_canonical(market, require_executable_quotes=True)
     finally:
         if own_client:
             client.close()

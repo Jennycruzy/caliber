@@ -140,11 +140,32 @@ def rank_signals(*, scan: dict[str, Any] | None, calibration: dict[str, Any] | N
                  message: str, limit: int, now: datetime, max_age_minutes: int,
                  min_close_minutes: int, max_spread: float, cursor: str | None = None) -> dict[str, Any]:
     if not scan:
-        raise OracleError("SIGNALS_UNAVAILABLE", "no opportunity scan is available", http_status=503)
+        raise OracleError(
+            "SIGNALS_UNAVAILABLE",
+            "no opportunity scan is available",
+            http_status=503,
+            details={
+                "reason": "scan_missing",
+                "retryable": True,
+                "action": "retry after the next opportunity scan completes",
+            },
+        )
     created = _dt(scan.get("created_at"))
     age_minutes = ((now - created).total_seconds() / 60) if created else float("inf")
     if age_minutes < 0 or age_minutes > max_age_minutes:
-        raise OracleError("SIGNALS_STALE", "the latest opportunity scan is stale; no signal was returned", http_status=503)
+        raise OracleError(
+            "SIGNALS_STALE",
+            "the latest opportunity scan is stale; no signal was returned",
+            http_status=503,
+            details={
+                "reason": "scan_stale",
+                "scan_created_at": scan.get("created_at"),
+                "scan_age_minutes": round(age_minutes, 1) if age_minutes != float("inf") else None,
+                "max_age_minutes": max_age_minutes,
+                "retryable": True,
+                "action": "retry after the next opportunity scan completes",
+            },
+        )
 
     domain, venue, family = _intent(message)
     accepted: list[dict[str, Any]] = []

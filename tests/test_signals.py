@@ -163,6 +163,13 @@ class SignalEndpointTests(unittest.TestCase):
         response = self.request("POST", "/v1/signals", json={"message": "best signals"})
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "SIGNALS_STALE")
+        self.assertEqual(response.json()["error"]["details"]["reason"], "scan_stale")
+        self.assertTrue(response.json()["error"]["details"]["retryable"])
+
+    def test_get_query_validation_is_400_not_internal_error(self):
+        response = self.request("GET", "/v1/signals?limit=999")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_elapsed_weather_day_is_not_a_signal_even_if_trading_remains_open(self):
         data = json.loads(self.scan.read_text())

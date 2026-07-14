@@ -10,11 +10,13 @@ from datetime import datetime, timezone
 from html import unescape
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from rwoo.domain import classify_limitless
 from rwoo.models import CanonicalMarket
+from rwoo.readers.errors import ExecutableQuoteUnavailable
 
 BASE_URL = "https://api.limitless.exchange"
 
@@ -134,7 +136,7 @@ def fetch_market(slug: str, client: httpx.Client | None = None) -> dict:
     own_client = client is None
     client = client or httpx.Client(timeout=20)
     try:
-        resp = client.get(f"{BASE_URL}/markets/{slug}")
+        resp = client.get(f"{BASE_URL}/markets/{quote(str(slug), safe='')}")
         resp.raise_for_status()
         return resp.json()
     finally:
@@ -212,8 +214,22 @@ def _question(market: dict, parent: dict | None) -> tuple[str, str | None]:
     return title, None
 
 
-def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
+def to_canonical(
+    market: dict,
+    parent: dict | None = None,
+    *,
+    require_executable_quotes: bool = False,
+) -> CanonicalMarket:
     bid, ask, price_method = _yes_bid_ask(market)
+    market_id = str(market.get("slug") or market.get("address") or market.get("id") or "")
+    if require_executable_quotes and not price_method.startswith("tradePrices."):
+        raise ExecutableQuoteUnavailable(
+            "limitless", market_id, "Limitless response did not include executable buy and sell quotes",
+        )
+    if not (0 <= bid <= ask <= 1):
+        raise ExecutableQuoteUnavailable(
+            "limitless", market_id, "Limitless returned an invalid or crossed bid/ask pair",
+        )
     implied_prob = (bid + ask) / 2
     spread = max(0.0, ask - bid)
     rule = _plain_text(market.get("description") or (parent or {}).get("description"))
@@ -241,7 +257,7 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
         # address), not a Polymarket-style condition ID. Exposing conditionId
         # here made scanner-discovered markets impossible to retrieve through
         # /v1/check-market and /v1/cross-venue-edge.
-        market_id=str(market.get("slug") or market.get("address") or market.get("id") or ""),
+        market_id=market_id,
         question=question,
         domain=classify_limitless(categories, tags, question, rule),
         resolution_rule=rule,
@@ -265,7 +281,15 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
 
 
 def fetch_canonical_markets(active_limit: int = 100) -> list[CanonicalMarket]:
-    return [to_canonical(row["market"], row.get("parent")) for row in fetch_scanner_markets(active_limit=active_limit)]
+    out: list[CanonicalMarket] = []
+    for row in fetch_scanner_markets(active_limit=active_limit):
+        try:
+            out.append(to_canonical(row["market"], row.get("parent")))
+        except ExecutableQuoteUnavailable:
+            # A single malformed/crossed venue book must not abort the broad
+            # scan. Exact paid lookups remain strict and surface SOURCE_STALE.
+            continue
+    return out
 
 
 def fetch_canonical_market(slug: str, client: httpx.Client | None = None) -> CanonicalMarket | None:
@@ -283,9 +307,67 @@ def fetch_canonical_market(slug: str, client: httpx.Client | None = None) -> Can
         if children:
             for child in children:
                 if slug in {str(child.get("conditionId")), str(child.get("id")), str(child.get("slug"))}:
-                    return to_canonical(child, obj)
-            return to_canonical(children[0], obj)
-        return to_canonical(obj)
+                    return to_canonical(child, obj, require_executable_quotes=True)
+            return None
+        return to_canonical(obj, require_executable_quotes=True)
+    finally:
+        if own_client:
+            client.close()
+
+
+def _candidate_ref(market: dict, parent: dict | None = None) -> dict | None:
+    market_id = market.get("slug") or market.get("address") or market.get("id")
+    if market_id in (None, ""):
+        return None
+    return {
+        "market_id": str(market_id),
+        "slug": market.get("slug"),
+        "question": _question(market, parent)[0],
+        "group_slug": (parent or {}).get("slug"),
+        "status": str(market.get("status") or (parent or {}).get("status") or "unknown").lower(),
+    }
+
+
+def suggest_market_refs(
+    market_id: str,
+    *,
+    limit: int = 5,
+    client: httpx.Client | None = None,
+) -> list[dict]:
+    """Return exact group children or fuzzy Limitless market candidates."""
+    market_id = (market_id or "").strip()
+    if not market_id:
+        return []
+    limit = max(1, min(int(limit), 10))
+    own_client = client is None
+    client = client or httpx.Client(timeout=10)
+    try:
+        parents: list[dict] = []
+        try:
+            raw = fetch_market(market_id, client=client)
+            obj = raw.get("data", raw) if isinstance(raw, dict) else None
+            if isinstance(obj, dict) and obj.get("markets"):
+                parents = [obj]
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+        if not parents:
+            query = re.sub(r"[^a-zA-Z0-9]+", " ", market_id).strip() or market_id
+            parents = [row for row in search_markets(query, limit=limit, client=client)
+                       if isinstance(row, dict)]
+
+        out: list[dict] = []
+        seen: set[str] = set()
+        for parent in parents:
+            for row, group in _iter_market_rows(parent):
+                item = _candidate_ref(row, group)
+                if item is None or item["market_id"] in seen:
+                    continue
+                seen.add(item["market_id"])
+                out.append(item)
+                if len(out) >= limit:
+                    return out
+        return out
     finally:
         if own_client:
             client.close()

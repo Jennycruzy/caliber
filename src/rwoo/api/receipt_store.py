@@ -14,6 +14,8 @@ the same key returns the stored response and does NOT append a second receipt
 """
 from __future__ import annotations
 
+from collections import OrderedDict
+import copy
 import threading
 from typing import Any
 
@@ -45,19 +47,38 @@ class DecisionReceiptStore:
 
 
 class IdempotencyCache:
-    """In-process idempotency store. Keys are opaque client-supplied strings."""
+    """Bounded in-process store binding each key to one request fingerprint.
 
-    def __init__(self) -> None:
-        self._store: dict[str, dict[str, Any]] = {}
+    A key can replay only the exact same method/path/query/body. Reusing it for
+    a different request is a conflict, never a cache hit. Stored values are
+    copied so response-header mutation cannot corrupt future replays.
+    """
+
+    def __init__(self, max_entries: int = 10_000) -> None:
+        self._store: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
+        self._max_entries = max(1, max_entries)
         self._lock = threading.Lock()
 
-    def get(self, key: str) -> dict[str, Any] | None:
+    def get(self, key: str, fingerprint: str) -> dict[str, Any] | None:
         with self._lock:
-            return self._store.get(key)
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            stored_fingerprint, response = entry
+            if stored_fingerprint != fingerprint:
+                raise ValueError("idempotency key is already bound to a different request")
+            self._store.move_to_end(key)
+            return copy.deepcopy(response)
 
-    def put(self, key: str, response: dict[str, Any]) -> None:
+    def put(self, key: str, fingerprint: str, response: dict[str, Any]) -> None:
         with self._lock:
-            self._store[key] = response
+            existing = self._store.get(key)
+            if existing is not None and existing[0] != fingerprint:
+                raise ValueError("idempotency key is already bound to a different request")
+            self._store[key] = (fingerprint, copy.deepcopy(response))
+            self._store.move_to_end(key)
+            while len(self._store) > self._max_entries:
+                self._store.popitem(last=False)
 
 
 def request_hash(payload: dict[str, Any]) -> str:

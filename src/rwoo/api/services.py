@@ -392,8 +392,40 @@ def run_cross_venue(
     fetch_market: Callable,
     payment_reference: str | None = None,
 ) -> dict[str, Any]:
-    left = fetch_market(left_ref.venue, left_ref.market_id)
-    right = fetch_market(right_ref.venue, right_ref.market_id)
+    left_venue = (left_ref.venue or "").strip().lower()
+    right_venue = (right_ref.venue or "").strip().lower()
+    if left_venue == right_venue:
+        raise OracleError(
+            "INVALID_REQUEST",
+            "cross-venue edge requires two different venues",
+            details={"left_venue": left_venue, "right_venue": right_venue},
+        )
+    try:
+        left = fetch_market(left_ref.venue, left_ref.market_id)
+    except OracleError as exc:
+        raise OracleError(
+            exc.code,
+            exc.message,
+            http_status=exc.http_status,
+            details={
+                **exc.details,
+                "side": "left",
+                "market": {"venue": left_ref.venue, "market_id": left_ref.market_id},
+            },
+        ) from exc
+    try:
+        right = fetch_market(right_ref.venue, right_ref.market_id)
+    except OracleError as exc:
+        raise OracleError(
+            exc.code,
+            exc.message,
+            http_status=exc.http_status,
+            details={
+                **exc.details,
+                "side": "right",
+                "market": {"venue": right_ref.venue, "market_id": right_ref.market_id},
+            },
+        ) from exc
     if left.venue == right.venue:
         raise OracleError(
             "INVALID_REQUEST",

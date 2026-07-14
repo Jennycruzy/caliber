@@ -14,21 +14,25 @@ in production by accident.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
+import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from weakref import WeakValueDictionary
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from rwoo.api import API_VERSION
 from rwoo.api.config import Settings, get_settings
 from rwoo.api.errors import OracleError
-from rwoo.api.market_fetch import SUPPORTED_VENUES, fetch_canonical
+from rwoo.api.market_fetch import SUPPORTED_VENUES, discover_live_candidates, fetch_canonical
 from rwoo.api import payment as payment_mod
 from rwoo.api.payment import (
     PaymentConfig,
@@ -44,9 +48,11 @@ from rwoo.api.receipt_store import DecisionReceiptStore, IdempotencyCache, reque
 from rwoo.api.schemas import (
     CheckMarketRequest,
     CheckMarketResponse,
+    CalibrationResponse,
     CrossVenueRequest,
     CrossVenueResponse,
     ErrorEnvelope,
+    MarketCandidatesResponse,
     SignalRequest,
     SignalResponse,
 )
@@ -63,6 +69,15 @@ from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
 
 REQUEST_ID_HEADER = "X-Request-ID"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
+IDEMPOTENCY_REPLAY_HEADER = "X-Idempotent-Replay"
+
+_IDEMPOTENT_ROUTES = {
+    ("POST", "/"),
+    ("GET", "/v1/signals"),
+    ("POST", "/v1/signals"),
+    ("POST", "/v1/check-market"),
+    ("POST", "/v1/cross-venue-edge"),
+}
 
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -82,6 +97,54 @@ _SERVICE_DESCRIPTION = {
     "rwoo.check_market": "Independent probability, interval, executable-price EV, why-trace, and receipt for one market.",
     "rwoo.cross_venue_edge": "Conservative cross-venue equivalence and executable complementary edge with risk disclosure.",
 }
+
+_PROBABILITY_BANDS = tuple(f"{index / 10:.1f}-{(index + 1) / 10:.1f}" for index in range(10))
+
+
+def _validate_calibration_scope(
+    report: dict[str, Any] | None,
+    *,
+    family: str | None,
+    model_version: str | None,
+    probability_band: str | None,
+) -> None:
+    if probability_band is not None and probability_band not in _PROBABILITY_BANDS:
+        raise OracleError(
+            "INVALID_REQUEST",
+            f"unknown probability_band {probability_band!r}",
+            details={"available_probability_bands": list(_PROBABILITY_BANDS)},
+        )
+    if family is None:
+        return
+    report = report or {}
+    evidence = report.get("model_evidence") or {}
+    promotion = report.get("promotion_readiness") or {}
+    retrospective = report.get("retrospective_validation") or {}
+    available_families = sorted(set(MODEL_VERSIONS) | set(evidence) | set(promotion) | set(retrospective))
+    if family not in available_families:
+        raise OracleError(
+            "NOT_FOUND",
+            f"unknown calibration family {family!r}",
+            details={"available_families": available_families},
+        )
+    if model_version is None:
+        return
+    versions = set((evidence.get(family) or {}).keys())
+    if family in MODEL_VERSIONS:
+        versions.add(MODEL_VERSIONS[family])
+    retrospective_row = retrospective.get(family) or {}
+    versions.update(
+        value for value in (
+            retrospective_row.get("target_model_version"),
+            retrospective_row.get("source_model_version"),
+        ) if value
+    )
+    if model_version not in versions:
+        raise OracleError(
+            "NOT_FOUND",
+            f"unknown model version {model_version!r} for family {family!r}",
+            details={"family": family, "available_model_versions": sorted(versions)},
+        )
 
 
 def enforce_payment(request: Request, service: str, payload: dict[str, Any]) -> str | None:
@@ -157,6 +220,7 @@ def create_app(
     app.state.settings = settings
     app.state.receipt_store = DecisionReceiptStore(settings.decision_ledger_path)
     app.state.idempotency = IdempotencyCache()
+    app.state.idempotency_locks = WeakValueDictionary()
     app.state.fetch_market = fetch_market
     app.state.evaluate = evaluate
     app.state.payment_config = payment_config
@@ -173,19 +237,28 @@ def create_app(
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Content-Type", REQUEST_ID_HEADER, IDEMPOTENCY_HEADER, "X-PAYMENT", "PAYMENT-SIGNATURE"],
-        expose_headers=[REQUEST_ID_HEADER],
+        expose_headers=[
+            REQUEST_ID_HEADER,
+            IDEMPOTENCY_REPLAY_HEADER,
+            "PAYMENT-REQUIRED",
+            payment_mod.PAYMENT_RESPONSE_HEADER,
+            "WWW-Authenticate",
+        ],
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 
     @app.middleware("http")
     async def _request_context(request: Request, call_next):
         rid = request.headers.get(REQUEST_ID_HEADER) or f"req_{uuid.uuid4().hex}"
+        if len(rid) > 200 or not rid.isascii() or any(ord(char) < 32 for char in rid):
+            rid = f"req_{uuid.uuid4().hex}"
         request.state.request_id = rid
 
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
-                if int(content_length) > settings.max_body_bytes:
+                parsed_length = int(content_length)
+                if parsed_length < 0 or parsed_length > settings.max_body_bytes:
                     return _error_response(
                         OracleError("INVALID_REQUEST", "request body exceeds the size limit"), rid
                     )
@@ -193,13 +266,87 @@ def create_app(
                 return _error_response(OracleError("INVALID_REQUEST", "invalid Content-Length"), rid)
 
         try:
-            response = await call_next(request)
+            # Enforce the real body size as well as Content-Length so chunked
+            # requests cannot bypass the application limit. Starlette caches
+            # this body for FastAPI's downstream parser.
+            raw_body = await request.body()
+            if len(raw_body) > settings.max_body_bytes:
+                return _error_response(
+                    OracleError("INVALID_REQUEST", "request body exceeds the size limit"), rid
+                )
+
+            idem = request.headers.get(IDEMPOTENCY_HEADER)
+            idempotent_route = (request.method.upper(), request.url.path) in _IDEMPOTENT_ROUTES
+            if idem and idempotent_route:
+                if len(idem) > 200 or not idem.isascii() or any(ord(char) < 33 for char in idem):
+                    raise OracleError(
+                        "INVALID_REQUEST",
+                        "Idempotency-Key must be 1-200 visible ASCII characters without spaces",
+                    )
+                fingerprint = hashlib.sha256(b"\0".join([
+                    request.method.upper().encode("ascii"),
+                    request.url.path.encode("utf-8"),
+                    request.url.query.encode("utf-8"),
+                    raw_body,
+                    # Bind a paid cached deliverable to the exact payment
+                    # credential as well as its request. Idempotency keys are
+                    # not authentication tokens and may be observable in logs.
+                    (
+                        request.headers.get("PAYMENT-SIGNATURE")
+                        or request.headers.get(payment_mod.X_PAYMENT_HEADER)
+                        or ""
+                    ).encode("utf-8"),
+                ])).hexdigest()
+                lock = request.app.state.idempotency_locks.get(idem)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    request.app.state.idempotency_locks[idem] = lock
+                async with lock:
+                    try:
+                        cached = request.app.state.idempotency.get(idem, fingerprint)
+                    except ValueError as exc:
+                        raise OracleError(
+                            "IDEMPOTENCY_CONFLICT",
+                            "Idempotency-Key is already bound to a different request",
+                            details={"action": "use a new Idempotency-Key for the changed request"},
+                        ) from exc
+                    if cached is not None:
+                        request.state.idempotency_replay = True
+                        headers = dict(cached["headers"])
+                        headers[IDEMPOTENCY_REPLAY_HEADER] = "true"
+                        response = Response(
+                            content=cached["body"],
+                            status_code=cached["status_code"],
+                            headers=headers,
+                            media_type=cached.get("media_type"),
+                        )
+                    else:
+                        response = await call_next(request)
+                        if 200 <= response.status_code < 300:
+                            response_body = b"".join([chunk async for chunk in response.body_iterator])
+                            cached_response = {
+                                "body": response_body,
+                                "status_code": response.status_code,
+                                "headers": {**dict(response.headers), REQUEST_ID_HEADER: rid},
+                                "media_type": response.media_type,
+                            }
+                            request.app.state.idempotency.put(idem, fingerprint, cached_response)
+                            response = Response(
+                                content=response_body,
+                                status_code=response.status_code,
+                                headers=dict(response.headers),
+                                media_type=response.media_type,
+                                background=response.background,
+                            )
+            else:
+                response = await call_next(request)
         except OracleError as exc:
             return _error_response(exc, rid)
         except Exception:  # never leak a stack trace
             return _error_response(OracleError("INTERNAL_ERROR", "internal error"), rid)
 
-        response.headers[REQUEST_ID_HEADER] = rid
+        if not getattr(request.state, "idempotency_replay", False):
+            response.headers[REQUEST_ID_HEADER] = rid
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)
         payment_response = getattr(request.state, "payment_response", None)
@@ -310,6 +457,91 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
     server = x402ResourceServer(facilitator)
     server.register(config.network, ExactEvmScheme())
 
+    def current_market_refs() -> list[dict[str, str]]:
+        """Current retrievable IDs for copy-ready Bazaar request examples."""
+        settings: Settings = app.state.settings
+        if not _opportunity_scan_check(settings)["ok"]:
+            return []
+        scan = services.load_json_artifact(settings.opportunity_scan_path) or {}
+        ranked_refs: list[tuple[int, dict[str, str]]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in scan.get("top") or []:
+            venue = str(row.get("venue") or "").strip().lower()
+            market_id = str(row.get("market_id") or "").strip()
+            status = str(row.get("market_status") or "").strip().lower()
+            key = (venue, market_id)
+            if venue not in SUPPORTED_VENUES or not market_id or key in seen:
+                continue
+            if status and status not in {"active", "open", "funded"}:
+                continue
+            seen.add(key)
+            # Prefer rows the latest scan found actionable, while retaining
+            # open rows as a fallback when no actionable row exists for a venue.
+            priority = 0 if row.get("actionable") is True or row.get("coverage_status") == "actionable" else 1
+            ranked_refs.append((priority, {"venue": venue, "market_id": market_id}))
+        ranked_refs.sort(key=lambda item: item[0])
+        return [ref for _, ref in ranked_refs]
+
+    def current_body_example(service: str, request_model) -> dict[str, Any]:
+        example = copy.deepcopy(
+            request_model.model_config.get("json_schema_extra", {}).get("example", {})
+        )
+        refs = current_market_refs()
+        if service == services.CHECK_MARKET_SERVICE and refs:
+            example["market"] = refs[0]
+        elif service == services.CROSS_VENUE_SERVICE:
+            pair = next(
+                ((left, right) for left in refs for right in refs if left["venue"] != right["venue"]),
+                None,
+            )
+            if pair:
+                example["left"], example["right"] = pair
+        return example
+
+    def compact_body_schema(service: str, request_model) -> dict[str, Any]:
+        """Keep Bazaar discovery below common 4 KiB proxy header buffers."""
+        if service == SIGNAL_SERVICE:
+            return request_model.model_json_schema()
+        venue_ref = {
+            "type": "object",
+            "properties": {
+                "venue": {"type": "string", "enum": list(SUPPORTED_VENUES)},
+                "market_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": (
+                        "Exact venue ID. Polymarket accepts numeric, 0x condition, market slug, "
+                        "or single-market event slug."
+                    ),
+                },
+            },
+            "required": ["venue", "market_id"],
+            "additionalProperties": False,
+        }
+        include = {
+            "type": "object",
+            "properties": {
+                "why_trace": {"type": "boolean"},
+                "calibration": {"type": "boolean"},
+                "receipt": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        }
+        if service == services.CHECK_MARKET_SERVICE:
+            return {
+                "type": "object",
+                "properties": {"market": venue_ref, "include": include},
+                "required": ["market"],
+                "additionalProperties": False,
+            }
+        return {
+            "type": "object",
+            "properties": {"left": venue_ref, "right": venue_ref, "include": include},
+            "required": ["left", "right"],
+            "additionalProperties": False,
+        }
+
     def discovery_extension(method: str, service: str) -> dict[str, Any]:
         """Describe paid request and response shapes inside the x402 challenge.
 
@@ -378,7 +610,7 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                 services.CHECK_MARKET_SERVICE: CheckMarketRequest,
                 services.CROSS_VENUE_SERVICE: CrossVenueRequest,
             }[service]
-            body_example = request_model.model_config.get("json_schema_extra", {}).get("example", {})
+            body_example = current_body_example(service, request_model)
             input_info = {
                 "type": "http", "method": method, "bodyType": "json", "body": body_example,
             }
@@ -386,7 +618,7 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                 "type": {"type": "string", "const": "http"},
                 "method": {"type": "string", "enum": ["POST", "PUT", "PATCH"]},
                 "bodyType": {"type": "string", "enum": ["json", "form-data", "text"]},
-                "body": request_model.model_json_schema(),
+                "body": compact_body_schema(service, request_model),
             }
             required_input = ["type", "method", "bodyType", "body"]
 
@@ -489,11 +721,6 @@ def _register_exception_handlers(app: FastAPI) -> None:
 def _register_routes(app: FastAPI, settings: Settings) -> None:
     # ------------------------- paid services -------------------------
     async def _best_signals(request: Request, body: SignalRequest):
-        idem = request.headers.get(IDEMPOTENCY_HEADER)
-        if idem:
-            cached = request.app.state.idempotency.get(idem)
-            if cached is not None:
-                return cached
         payload = body.model_dump()
         payment_reference = enforce_payment(request, SIGNAL_SERVICE, payload)
         scan = services.load_json_artifact(settings.opportunity_scan_path)
@@ -535,13 +762,16 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             "sequence": committed.sequence,
             "verification_url": settings.verification_url(committed.record_hash),
         }
-        if idem:
-            request.app.state.idempotency.put(idem, result)
         return result
 
     @app.post(
         "/v1/signals", response_model=SignalResponse,
-        responses={402: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
+        responses={
+            400: {"model": ErrorEnvelope, "description": "Invalid request"},
+            402: {"description": "x402 payment challenge (see PAYMENT-REQUIRED header) or payment error"},
+            409: {"model": ErrorEnvelope, "description": "Idempotency key reused for a different request or payment"},
+            503: {"model": ErrorEnvelope, "description": "Signal scan unavailable or stale"},
+        },
         tags=["services"], summary="Best Signals — ranked natural-language opportunities",
         operation_id="rwoo_best_signals",
     )
@@ -549,11 +779,21 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         return await _best_signals(request, body)
 
     @app.get("/v1/signals", response_model=SignalResponse, tags=["services"],
+             responses={
+                 400: {"model": ErrorEnvelope, "description": "Invalid query parameters"},
+                 402: {"description": "x402 payment challenge (see PAYMENT-REQUIRED header) or payment error"},
+                 409: {"model": ErrorEnvelope, "description": "Idempotency key reused for a different request or payment"},
+                 503: {"model": ErrorEnvelope, "description": "Signal scan unavailable or stale"},
+             },
              summary="Best Signals (GET form for x402 discovery clients)",
              operation_id="rwoo_best_signals_get")
-    async def best_signals_get(request: Request, message: str = "Give me the best signals now",
-                               limit: int = 5, min_minutes_to_close: int | None = None,
-                               cursor: str | None = None):
+    async def best_signals_get(
+        request: Request,
+        message: str = Query(default="Give me the best signals now", min_length=3, max_length=500),
+        limit: int = Query(default=5, ge=1, le=10),
+        min_minutes_to_close: int | None = Query(default=None, ge=5, le=10080),
+        cursor: str | None = Query(default=None, min_length=8, max_length=500),
+    ):
         body = SignalRequest(message=message, limit=limit, min_minutes_to_close=min_minutes_to_close,
                              cursor=cursor)
         return await _best_signals(request, body)
@@ -567,18 +807,28 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
     @app.post(
         "/v1/check-market",
         response_model=CheckMarketResponse,
-        responses={402: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
+        responses={
+            400: {"model": ErrorEnvelope, "description": "Invalid request or unsupported venue"},
+            402: {"description": "x402 payment challenge (see PAYMENT-REQUIRED header) or payment error"},
+            409: {"model": ErrorEnvelope, "description": "Idempotency key reused for a different request or payment"},
+            404: {"model": ErrorEnvelope, "description": "Market not found; may include candidate market IDs"},
+            422: {"model": ErrorEnvelope, "description": "Market cannot be safely evaluated"},
+            429: {"model": ErrorEnvelope, "description": "Upstream rate limited"},
+            503: {"model": ErrorEnvelope, "description": "Venue upstream unavailable"},
+            504: {"model": ErrorEnvelope, "description": "Venue upstream timed out"},
+        },
         tags=["services"],
         summary="Price and compare one supported market",
+        description=(
+            "The JSON body must contain `market` as an object: "
+            "`{\"market\": {\"venue\": \"polymarket\", \"market_id\": \"<id-or-slug>\"}}`. "
+            "Polymarket supports numeric Gamma IDs, condition IDs, market slugs, and "
+            "single-market event slugs. Unknown slugs return HTTP 404 and may include candidates."
+        ),
         operation_id="rwoo_check_market",
     )
     async def check_market(request: Request, body: CheckMarketRequest):
         rid = request.state.request_id
-        idem = request.headers.get(IDEMPOTENCY_HEADER)
-        if idem:
-            cached = request.app.state.idempotency.get(idem)
-            if cached is not None:  # retry: return cached, never re-charge
-                return cached
         payload = body.model_dump()
         payment_reference = enforce_payment(request, services.CHECK_MARKET_SERVICE, payload)
         result = services.run_check_market(
@@ -593,25 +843,31 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             evaluate=request.app.state.evaluate,
             payment_reference=payment_reference,
         )
-        if idem:
-            request.app.state.idempotency.put(idem, result)
         return result
 
     @app.post(
         "/v1/cross-venue-edge",
         response_model=CrossVenueResponse,
-        responses={402: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
+        responses={
+            400: {"model": ErrorEnvelope, "description": "Invalid request or unsupported venue"},
+            402: {"description": "x402 payment challenge (see PAYMENT-REQUIRED header) or payment error"},
+            409: {"model": ErrorEnvelope, "description": "Idempotency key reused for a different request or payment"},
+            404: {"model": ErrorEnvelope, "description": "One market was not found; may include candidates"},
+            422: {"model": ErrorEnvelope, "description": "Markets cannot be safely compared"},
+            429: {"model": ErrorEnvelope, "description": "Upstream rate limited"},
+            503: {"model": ErrorEnvelope, "description": "Venue upstream unavailable"},
+            504: {"model": ErrorEnvelope, "description": "Venue upstream timed out"},
+        },
         tags=["services"],
         summary="Compare two candidate-equivalent contracts across venues",
+        description=(
+            "`left` and `right` must each be objects containing `venue` and `market_id`, "
+            "and the venues must differ. Use GET `/v1/market-candidates` to obtain current IDs."
+        ),
         operation_id="rwoo_cross_venue_edge",
     )
     async def cross_venue(request: Request, body: CrossVenueRequest):
         rid = request.state.request_id
-        idem = request.headers.get(IDEMPOTENCY_HEADER)
-        if idem:
-            cached = request.app.state.idempotency.get(idem)
-            if cached is not None:  # retry: return cached, never re-charge
-                return cached
         payload = body.model_dump()
         payment_reference = enforce_payment(request, services.CROSS_VENUE_SERVICE, payload)
         result = services.run_cross_venue(
@@ -625,24 +881,45 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             fetch_market=request.app.state.fetch_market,
             payment_reference=payment_reference,
         )
-        if idem:
-            request.app.state.idempotency.put(idem, result)
         return result
 
-    @app.get("/v1/calibration", tags=["calibration"], summary="Public calibration summary")
+    @app.get(
+        "/v1/calibration", response_model=CalibrationResponse,
+        tags=["calibration"], summary="Public calibration summary",
+        operation_id="rwoo_get_calibration",
+    )
     async def calibration_all(request: Request, probability_band: str | None = None):
         report = services.load_json_artifact(settings.calibration_report_path)
+        _validate_calibration_scope(
+            report, family=None, model_version=None, probability_band=probability_band,
+        )
         return services.build_calibration(report=report, probability_band=probability_band)
 
-    @app.get("/v1/calibration/{family}", tags=["calibration"])
+    @app.get(
+        "/v1/calibration/{family}", response_model=CalibrationResponse, tags=["calibration"],
+        responses={404: {"model": ErrorEnvelope, "description": "Unknown calibration family"}},
+        operation_id="rwoo_get_calibration_family",
+    )
     async def calibration_family(family: str, request: Request, probability_band: str | None = None):
         report = services.load_json_artifact(settings.calibration_report_path)
+        _validate_calibration_scope(
+            report, family=family, model_version=None, probability_band=probability_band,
+        )
         return services.build_calibration(report=report, family=family, probability_band=probability_band)
 
-    @app.get("/v1/calibration/{family}/{model_version}", tags=["calibration"])
+    @app.get(
+        "/v1/calibration/{family}/{model_version}",
+        response_model=CalibrationResponse,
+        tags=["calibration"],
+        responses={404: {"model": ErrorEnvelope, "description": "Unknown family or model version"}},
+        operation_id="rwoo_get_calibration_model",
+    )
     async def calibration_family_model(family: str, model_version: str, request: Request,
                                        probability_band: str | None = None):
         report = services.load_json_artifact(settings.calibration_report_path)
+        _validate_calibration_scope(
+            report, family=family, model_version=model_version, probability_band=probability_band,
+        )
         return services.build_calibration(
             report=report, family=family, model_version_filter=model_version,
             probability_band=probability_band,
@@ -659,11 +936,19 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.get("/readyz", tags=["ops"], summary="Readiness: engine, ledger, paths, artifacts")
     async def readyz(request: Request):
-        checks = _readiness_checks(request.app.state.receipt_store, settings)
-        ready = all(c["ok"] for c in checks.values())
+        checks = _readiness_checks(
+            request.app.state.receipt_store,
+            settings,
+            request.app.state.payment_config,
+        )
+        ready = all(c["ok"] for c in checks.values() if c.get("required", True))
+        degraded = ready and any(not c["ok"] for c in checks.values())
         return JSONResponse(
             status_code=200 if ready else 503,
-            content={"status": "ready" if ready else "not_ready", "checks": checks},
+            content={
+                "status": "degraded" if degraded else ("ready" if ready else "not_ready"),
+                "checks": checks,
+            },
         )
 
     @app.get("/version", tags=["ops"])
@@ -678,7 +963,7 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
     async def service_metadata(request: Request):
         config: PaymentConfig = request.app.state.payment_config
 
-        def svc(identifier, endpoint, description, payment_capable):
+        def svc(identifier, endpoint, description, payment_capable, methods):
             price = config.price_for(identifier)
             paid = bool(payment_capable and config.enabled and price is not None)
             return {
@@ -692,6 +977,7 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
                     "rwoo.get_calibration": "Get Calibration",
                 }.get(identifier, identifier),
                 "endpoint": f"{settings.api_base_url.rstrip('/')}{endpoint}",
+                "methods": methods,
                 "description": description,
                 "paid": paid,
                 # Price is only populated once an operator sets it via env; it is
@@ -700,6 +986,11 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             }
 
         ready, missing = config.settlement_readiness()
+        operational_checks = _readiness_checks(request.app.state.receipt_store, settings, config)
+        core_ready = all(
+            check["ok"] for check in operational_checks.values() if check.get("required", True)
+        )
+        signal_scan_ready = operational_checks.get("paid_signal_scan", {"ok": True})["ok"]
         return {
             "name": "Real-World Odds Oracle",
             "tagline": "The true odds, proven.",
@@ -721,18 +1012,119 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
                 "asset_decimals": config.asset_decimals,
                 "recipient": config.recipient,
                 "settlement_ready": ready,
+                "operational_ready": core_ready,
+                "readiness_url": f"{settings.api_base_url.rstrip('/')}/readyz",
                 "pending_operator_config": missing,
             },
             "services": [
                 svc("rwoo.best_signals", "/v1/signals",
-                    _SERVICE_DESCRIPTION["rwoo.best_signals"], True),
+                    _SERVICE_DESCRIPTION["rwoo.best_signals"], True, ["GET", "POST"]),
                 svc("rwoo.check_market", "/v1/check-market",
-                    _SERVICE_DESCRIPTION["rwoo.check_market"], True),
+                    _SERVICE_DESCRIPTION["rwoo.check_market"], True, ["POST"]),
                 svc("rwoo.cross_venue_edge", "/v1/cross-venue-edge",
-                    _SERVICE_DESCRIPTION["rwoo.cross_venue_edge"], True),
+                    _SERVICE_DESCRIPTION["rwoo.cross_venue_edge"], True, ["POST"]),
                 svc("rwoo.get_calibration", "/v1/calibration",
-                    "Public precommitted calibration record by family, model version, and probability band.", False),
+                    "Public precommitted calibration record by family, model version, and probability band.",
+                    False, ["GET"]),
             ],
+            "service_readiness": {
+                "rwoo.best_signals": {
+                    "ready": signal_scan_ready,
+                    "detail": operational_checks.get("paid_signal_scan", {}).get("detail"),
+                },
+                "rwoo.check_market": {"ready": core_ready},
+                "rwoo.cross_venue_edge": {"ready": core_ready},
+                "rwoo.get_calibration": {"ready": True},
+            },
+        }
+
+    @app.get(
+        "/v1/market-candidates",
+        response_model=MarketCandidatesResponse,
+        tags=["ops"],
+        summary="Current market identifiers for check-market and cross-venue requests",
+    )
+    async def market_candidates(
+        venue: str | None = Query(default=None, max_length=32),
+        query: str | None = Query(default=None, max_length=200),
+        limit: int = Query(default=10, ge=1, le=20),
+    ):
+        normalized_venue = venue.strip().lower() if venue else None
+        if normalized_venue and normalized_venue not in SUPPORTED_VENUES:
+            raise OracleError(
+                "UNSUPPORTED_VENUE",
+                f"venue {normalized_venue!r} is not supported; supported venues are {', '.join(SUPPORTED_VENUES)}",
+            )
+        scan_check = _opportunity_scan_check(settings)
+        if not scan_check["ok"]:
+            candidates, live_errors = await discover_live_candidates(
+                venue=normalized_venue,
+                query=query,
+                limit=limit,
+            )
+            if not candidates and live_errors and len(live_errors) == (
+                1 if normalized_venue else len(SUPPORTED_VENUES)
+            ):
+                raise OracleError(
+                    "SOURCE_UNAVAILABLE",
+                    "live market discovery is temporarily unavailable",
+                    details={
+                        "scan": scan_check,
+                        "venue_errors": live_errors,
+                        "retryable": True,
+                        "action": "retry later or submit a known exact venue market_id",
+                    },
+                )
+            return {
+                "scan_created_at": None,
+                "venue": normalized_venue,
+                "query": query,
+                "candidates": candidates,
+                "count": len(candidates),
+                "source": "live_venue_fallback",
+                "freshness_status": "live",
+                "note": "Live venue discovery was used because the scan artifact was stale; use IDs exactly as returned.",
+            }
+        terms = [term for term in (query or "").lower().replace("-", " ").split() if term]
+        scan = services.load_json_artifact(settings.opportunity_scan_path) or {}
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in scan.get("top") or []:
+            row_venue = str(row.get("venue") or "").lower()
+            row_id = str(row.get("market_id") or "")
+            status = str(row.get("market_status") or "").lower()
+            haystack = f"{row_id} {row.get('question') or ''} {row.get('family') or ''}".lower()
+            key = (row_venue, row_id)
+            if not row_id or key in seen:
+                continue
+            if row_venue not in SUPPORTED_VENUES:
+                continue
+            if normalized_venue and row_venue != normalized_venue:
+                continue
+            if status and status not in {"active", "open", "funded"}:
+                continue
+            if terms and not all(term in haystack for term in terms):
+                continue
+            seen.add(key)
+            candidates.append({
+                "venue": row_venue,
+                "market_id": row_id,
+                "question": row.get("question"),
+                "family": row.get("family"),
+                "market_status": row.get("market_status"),
+                "trading_close_time": row.get("trading_close_time"),
+            })
+            if len(candidates) >= limit:
+                break
+        return {
+            "scan_created_at": scan.get("created_at"),
+            "venue": normalized_venue,
+            "query": query,
+            "candidates": candidates,
+            "count": len(candidates),
+            "source": "opportunity_scan",
+            "freshness_status": "fresh",
+            "note": "Use venue and market_id exactly as returned; availability and quotes can change.",
         }
 
     @app.get("/v1/supported-markets", tags=["ops"], summary="Coverage: venues, families, series")
@@ -814,7 +1206,49 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         }
 
 
-def _readiness_checks(receipt_store: DecisionReceiptStore, settings: Settings) -> dict[str, Any]:
+def _opportunity_scan_check(settings: Settings) -> dict[str, Any]:
+    path = settings.opportunity_scan_path
+    scan = services.load_json_artifact(path)
+    if scan is None:
+        return {
+            "ok": False,
+            "detail": "opportunity scan is missing or invalid JSON",
+            "path": str(path),
+        }
+    created_at = scan.get("created_at")
+    try:
+        created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return {"ok": False, "detail": "opportunity scan has an invalid created_at"}
+    age_minutes = (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds() / 60
+    if age_minutes < -5:
+        return {
+            "ok": False,
+            "detail": "opportunity scan timestamp is in the future",
+            "scan_created_at": created_at,
+        }
+    if age_minutes > settings.signal_scan_max_age_minutes:
+        return {
+            "ok": False,
+            "detail": "opportunity scan is stale",
+            "scan_created_at": created_at,
+            "age_minutes": round(age_minutes, 1),
+            "max_age_minutes": settings.signal_scan_max_age_minutes,
+        }
+    return {
+        "ok": True,
+        "scan_created_at": created_at,
+        "age_minutes": round(max(0.0, age_minutes), 1),
+    }
+
+
+def _readiness_checks(
+    receipt_store: DecisionReceiptStore,
+    settings: Settings,
+    payment_config: PaymentConfig | None = None,
+) -> dict[str, Any]:
     checks: dict[str, Any] = {}
     # engine import
     try:
@@ -842,6 +1276,19 @@ def _readiness_checks(receipt_store: DecisionReceiptStore, settings: Settings) -
         checks["calibration_report"] = {"ok": services.load_json_artifact(report_path) is not None}
     else:
         checks["calibration_report"] = {"ok": True, "detail": "absent; evidence accumulating"}
+    # A paid Best Signals route cannot fulfill its advertised response without
+    # a recent scan. Check this only when that paid service is enabled so a
+    # check-market-only/local deployment is not incorrectly marked unavailable.
+    if (
+        payment_config is not None
+        and payment_config.enabled
+        and payment_config.price_for(SIGNAL_SERVICE) is not None
+    ):
+        checks["paid_signal_scan"] = {
+            **_opportunity_scan_check(settings),
+            "required": False,
+            "service": SIGNAL_SERVICE,
+        }
     return checks
 
 

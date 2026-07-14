@@ -94,29 +94,58 @@ result uses `status: "no_signal"`.
 
 Evaluate one supported market.
 
+`market` is a required object, not a string. It must contain `venue` and
+`market_id`. For Polymarket, `market_id` may be a numeric Gamma market ID, a
+`0x` condition ID, an exact market slug, or a single-market event slug. Kalshi
+requires an exact market ticker. Limitless accepts a market slug, address, or
+numeric market ID; an ambiguous group slug returns its child candidates instead
+of silently choosing one.
+
+Current copy-ready identifiers are available without payment:
+
+```bash
+curl -sS 'https://api.trueodd.xyz/v1/market-candidates?venue=polymarket&query=fed'
+```
+
 ```http
 POST /v1/check-market
 Content-Type: application/json
 
 {
   "market": {
-    "venue": "kalshi",
-    "market_id": "<market-id>"
+    "venue": "polymarket",
+    "market_id": "<numeric-id, condition-id, or slug>"
   }
 }
 ```
 
 The response contains the forecast, market comparison, execution economics,
 calibration scope, request ID, and receipt reference. Idempotency and client
-request IDs are supported through headers.
+request IDs are supported through headers. Exact paid lookups require a real
+two-sided executable quote; a midpoint or synthetic `0.5` is never sold as a
+tradable price.
 
 ```bash
 curl -sS https://api.trueodd.xyz/v1/check-market \
   -H 'Content-Type: application/json' \
   -H 'X-Request-ID: agent-example-001' \
   -H 'Idempotency-Key: market-check-001' \
-  -d '{"market":{"venue":"kalshi","market_id":"<market-id>"}}'
+  -d '{"market":{"venue":"polymarket","market_id":"<numeric-id, condition-id, or slug>"}}'
 ```
+
+An unknown identifier returns `404 MARKET_NOT_FOUND`. When Polymarket search
+finds close matches, `error.details.candidates` contains safe identifiers that
+can be resubmitted. A genuine venue outage remains `503 SOURCE_UNAVAILABLE`
+and includes `upstream_status`, `reason`, `retryable`, and a suggested action;
+the upstream response body is never exposed.
+
+For a paid retry, resend the identical body, payment credential, and
+`Idempotency-Key`. A successful replay returns the original receipt without a
+second verification or settlement and includes `X-Idempotent-Replay: true`.
+Reusing the key for a changed request or payment returns
+`409 IDEMPOTENCY_CONFLICT`. The initial unpaid response is an x402 challenge;
+its `PAYMENT-REQUIRED` header contains the Bazaar request schema and a current
+request example.
 
 ### `rwoo.cross_venue_edge`
 
@@ -135,6 +164,8 @@ Content-Type: application/json
 Only exact agreement on event semantics, resolution authority, resolution
 time, and YES orientation can qualify. Similar titles are not enough. Results
 remain subject to fill, custody, venue, cancellation, and settlement risk.
+If either lookup fails, `error.details.side` identifies `left` or `right` and
+echoes the failed market reference.
 
 ### `rwoo.get_calibration`
 
@@ -143,12 +174,15 @@ Read the public evidence record.
 ```bash
 curl -sS https://api.trueodd.xyz/v1/calibration
 curl -sS https://api.trueodd.xyz/v1/calibration/weather.temperature
+curl -sS https://api.trueodd.xyz/v1/calibration/weather.temperature/weather-ensemble-v3-power-calibrated
 ```
 
 The report exposes independent event counts, correlated contract-row counts,
 Brier scores, reliability bands, official-source concordance, market
 benchmarking, cost-adjusted performance, drift monitoring, fixed-checkpoint
 reviews, and the execution interlock.
+Unknown families or model versions return `404` with available candidates;
+probability bands use the explicit form `0.0-0.1` through `0.9-1.0`.
 
 ## Domain coverage
 

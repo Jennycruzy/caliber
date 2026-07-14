@@ -27,9 +27,31 @@ class _OpenModel(BaseModel):
 
 
 class MarketRef(_StrictModel):
-    venue: str = Field(..., min_length=1, examples=["kalshi"])
-    market_id: str = Field(..., min_length=1, examples=["KXHIGHNY-26JUL12-B85"])
-    question: str | None = Field(default=None, description="Optional when market_id is supplied.")
+    venue: str = Field(
+        ...,
+        min_length=1,
+        examples=["polymarket"],
+        description="Supported venue name: kalshi, polymarket, or limitless.",
+    )
+    market_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        examples=["fed-decision-in-october"],
+        description=(
+            "Venue-native identifier. For Polymarket, accepts a numeric Gamma market ID, "
+            "a 0x-prefixed condition ID, an exact market slug, or a single-market event slug. "
+            "Use GET /v1/market-candidates to discover current identifiers."
+        ),
+    )
+    question: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Optional informational label for logs/clients. It is not used to resolve a market "
+            "and never substitutes for the required exact market_id."
+        ),
+    )
 
 
 class IncludeOptions(_StrictModel):
@@ -39,14 +61,20 @@ class IncludeOptions(_StrictModel):
 
 
 class CheckMarketRequest(_StrictModel):
-    market: MarketRef
+    market: MarketRef = Field(
+        ...,
+        description="Required market reference object with both venue and market_id.",
+    )
     include: IncludeOptions = Field(default_factory=IncludeOptions)
 
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
             "example": {
-                "market": {"venue": "kalshi", "market_id": "KXHIGHNY-26JUL12-B85"},
+                "market": {
+                    "venue": "polymarket",
+                    "market_id": "<current-id-from-/v1/market-candidates>",
+                },
                 "include": {"why_trace": True, "calibration": True, "receipt": True},
             }
         },
@@ -54,8 +82,14 @@ class CheckMarketRequest(_StrictModel):
 
 
 class VenueRef(_StrictModel):
-    venue: str = Field(..., min_length=1)
-    market_id: str = Field(..., min_length=1)
+    venue: str = Field(
+        ..., min_length=1, max_length=32,
+        description="Supported venue name: kalshi, polymarket, or limitless.",
+    )
+    market_id: str = Field(
+        ..., min_length=1, max_length=256,
+        description="Exact venue-native identifier; current IDs are available from /v1/market-candidates.",
+    )
 
 
 class CrossVenueRequest(_StrictModel):
@@ -67,8 +101,8 @@ class CrossVenueRequest(_StrictModel):
         extra="forbid",
         json_schema_extra={
             "example": {
-                "left": {"venue": "kalshi", "market_id": "KXHIGHNY-26JUL12-B85"},
-                "right": {"venue": "polymarket", "market_id": "0xabc..."},
+                "left": {"venue": "kalshi", "market_id": "<current-kalshi-id>"},
+                "right": {"venue": "polymarket", "market_id": "<current-polymarket-id>"},
             }
         },
     )
@@ -191,6 +225,36 @@ class SignalResponse(_OpenModel):
     pagination: dict[str, Any] = Field(default_factory=dict)
     evidence_notice: str | None = None
     receipt: ReceiptRef | None = None
+
+
+class CalibrationResponse(_OpenModel):
+    service: str
+    status: str
+    created_at: str
+    report_available: bool
+    report_created_at: str | None = None
+    message: str | None = None
+    precommitted_forecasts: int = 0
+    resolved_forecasts: int = 0
+    unresolved_forecasts: int = 0
+    independent_resolved_event_groups: int = 0
+    calibration: Any | None = None
+    families: dict[str, Any] = Field(default_factory=dict)
+    model_evidence: dict[str, Any] = Field(default_factory=dict)
+    retrospective_validation: dict[str, Any] = Field(default_factory=dict)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    warning: str | None = None
+
+
+class MarketCandidatesResponse(_OpenModel):
+    scan_created_at: str | None = None
+    venue: str | None = None
+    query: str | None = None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    source: str
+    freshness_status: str
+    note: str
 
 
 class ErrorEnvelope(_OpenModel):

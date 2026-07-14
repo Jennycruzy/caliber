@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from rwoo.api.app import create_app
 from rwoo.api.config import Settings
@@ -151,9 +153,22 @@ class CheckMarketTests(unittest.TestCase):
     def test_idempotency_key_returns_same_receipt(self):
         client, _ = client_for(self.tmp)
         headers = {"Idempotency-Key": "abc"}
-        first = client.post("/v1/check-market", json={"market": {"venue": "kalshi", "market_id": "KX-1"}}, headers=headers).json()
+        first_response = client.post(
+            "/v1/check-market",
+            json={"market": {"venue": "kalshi", "market_id": "KX-1"}},
+            headers=headers,
+        )
+        first = first_response.json()
         second = client.post("/v1/check-market", json={"market": {"venue": "kalshi", "market_id": "KX-1"}}, headers=headers).json()
         self.assertEqual(first["receipt"]["record_hash"], second["receipt"]["record_hash"])
+        replay = client.post(
+            "/v1/check-market",
+            json={"market": {"venue": "kalshi", "market_id": "KX-1"}},
+            headers=headers,
+        )
+        self.assertEqual(replay.headers["X-Idempotent-Replay"], "true")
+        self.assertEqual(replay.headers["X-Request-ID"], first_response.headers["X-Request-ID"])
+        self.assertEqual(replay.json()["request_id"], replay.headers["X-Request-ID"])
         # exactly one receipt was committed
         listing = client.get(f"/v1/receipts/{first['receipt']['record_hash']}").json()
         self.assertEqual(listing["sequence"], 1)
@@ -196,6 +211,23 @@ class CheckMarketTests(unittest.TestCase):
         resp = client.post("/v1/check-market",
                            json={"market": {"venue": "kalshi", "market_id": "X"}, "surprise": 1})
         self.assertEqual(resp.status_code, 400)
+
+    def test_idempotency_key_cannot_be_reused_for_changed_request(self):
+        client, _ = client_for(self.tmp)
+        headers = {"Idempotency-Key": "bound-key"}
+        first = client.post(
+            "/v1/check-market",
+            json={"market": {"venue": "kalshi", "market_id": "A"}},
+            headers=headers,
+        )
+        changed = client.post(
+            "/v1/check-market",
+            json={"market": {"venue": "kalshi", "market_id": "B"}},
+            headers=headers,
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(changed.status_code, 409)
+        self.assertEqual(changed.json()["error"]["code"], "IDEMPOTENCY_CONFLICT")
 
     def test_body_too_large(self):
         client, _ = client_for(self.tmp, settings=make_settings(self.tmp, max_body_bytes=10))
@@ -252,6 +284,27 @@ class CrossVenueTests(unittest.TestCase):
         self.assertIn("risk", body["risk_disclosure"].lower())
         self.assertIsNotNone(body["receipt"]["record_hash"])
 
+    def test_cross_venue_error_identifies_the_failing_side(self):
+        def fetch(venue, market_id):
+            if market_id == "MISSING":
+                raise OracleError(
+                    "MARKET_NOT_FOUND", "market missing",
+                    details={"requested_market_id": market_id},
+                )
+            return a_market(venue, market_id)
+
+        client, _ = client_for(self.tmp, fetch=fetch)
+        response = client.post("/v1/cross-venue-edge", json={
+            "left": {"venue": "kalshi", "market_id": "A"},
+            "right": {"venue": "polymarket", "market_id": "MISSING"},
+        })
+        self.assertEqual(response.status_code, 404)
+        details = response.json()["error"]["details"]
+        self.assertEqual(details["side"], "right")
+        self.assertEqual(details["market"], {
+            "venue": "polymarket", "market_id": "MISSING",
+        })
+
 
 class OpsAndCalibrationTests(unittest.TestCase):
     def setUp(self):
@@ -267,6 +320,13 @@ class OpsAndCalibrationTests(unittest.TestCase):
         ready = client.get("/readyz")
         self.assertEqual(ready.status_code, 200)
         self.assertEqual(ready.json()["status"], "ready")
+
+    def test_cors_exposes_payment_and_idempotency_headers(self):
+        client, _ = client_for(self.tmp)
+        response = client.get("/health", headers={"Origin": "http://testserver"})
+        exposed = response.headers.get("Access-Control-Expose-Headers", "").lower()
+        for name in ("payment-required", "payment-response", "www-authenticate", "x-idempotent-replay"):
+            self.assertIn(name, exposed)
 
     def test_version_and_metadata(self):
         client, _ = client_for(self.tmp)
@@ -304,6 +364,59 @@ class OpsAndCalibrationTests(unittest.TestCase):
             internal["agriculture.commodity_price"]["availability"],
             "exact_settlement_source_not_integrated",
         )
+
+    def test_market_candidates_returns_current_resubmittable_ids(self):
+        scan_path = Path(self.tmp) / "scan.json"
+        scan_path.write_text(json.dumps({
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "top": [
+                {"venue": "polymarket", "market_id": "0xabc", "question": "Fed decision",
+                 "family": "economics.fed_rates", "market_status": "active"},
+                {"venue": "polymarket", "market_id": "0xclosed", "question": "Old Fed",
+                 "family": "economics.fed_rates", "market_status": "closed"},
+            ],
+        }), encoding="utf-8")
+        client, _ = client_for(
+            self.tmp,
+            settings=make_settings(self.tmp, opportunity_scan_path=scan_path),
+        )
+        response = client.get("/v1/market-candidates?venue=polymarket&query=fed")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["candidates"][0]["market_id"], "0xabc")
+        self.assertEqual(response.json()["count"], 1)
+
+    def test_market_candidates_uses_live_fallback_when_scan_is_missing(self):
+        missing = Path(self.tmp) / "missing-scan.json"
+        client, _ = client_for(
+            self.tmp,
+            settings=make_settings(self.tmp, opportunity_scan_path=missing),
+        )
+        live = [{
+            "venue": "polymarket", "market_id": "0xlive", "question": "Live Fed market",
+            "family": None, "market_status": "active", "trading_close_time": None,
+        }]
+        with patch("rwoo.api.app.discover_live_candidates", return_value=(live, [])):
+            response = client.get("/v1/market-candidates?venue=polymarket&query=fed")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"], "live_venue_fallback")
+        self.assertEqual(response.json()["freshness_status"], "live")
+        self.assertEqual(response.json()["candidates"][0]["market_id"], "0xlive")
+
+    def test_market_candidates_returns_actionable_503_only_if_all_live_sources_fail(self):
+        missing = Path(self.tmp) / "missing-scan.json"
+        client, _ = client_for(
+            self.tmp,
+            settings=make_settings(self.tmp, opportunity_scan_path=missing),
+        )
+        errors = [
+            {"venue": venue, "reason": "live_discovery_failed", "error_type": "ConnectError"}
+            for venue in ("kalshi", "polymarket", "limitless")
+        ]
+        with patch("rwoo.api.app.discover_live_candidates", return_value=([], errors)):
+            response = client.get("/v1/market-candidates")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "SOURCE_UNAVAILABLE")
+        self.assertTrue(response.json()["error"]["details"]["retryable"])
 
     def test_calibration_empty_state_is_honest(self):
         client, _ = client_for(self.tmp)  # report file does not exist
@@ -389,6 +502,30 @@ class OpsAndCalibrationTests(unittest.TestCase):
         self.assertEqual(band["independent_resolved_event_groups"], 2)
         self.assertEqual(band["calibration"]["brier_score"], .11)
 
+    def test_unknown_calibration_scope_returns_actionable_404(self):
+        client, _ = client_for(self.tmp)
+        family = client.get("/v1/calibration/not.a.family")
+        self.assertEqual(family.status_code, 404)
+        self.assertIn(
+            "weather.temperature",
+            family.json()["error"]["details"]["available_families"],
+        )
+        model = client.get("/v1/calibration/weather.temperature/not-a-version")
+        self.assertEqual(model.status_code, 404)
+        self.assertIn(
+            "weather-ensemble-v3-power-calibrated",
+            model.json()["error"]["details"]["available_model_versions"],
+        )
+
+    def test_invalid_probability_band_returns_candidates(self):
+        client, _ = client_for(self.tmp)
+        response = client.get("/v1/calibration?probability_band=70-80")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "0.7-0.8",
+            response.json()["error"]["details"]["available_probability_bands"],
+        )
+
     def test_evidence_status(self):
         client, _ = client_for(self.tmp)
         data = client.get("/v1/evidence/status").json()
@@ -400,6 +537,18 @@ class OpsAndCalibrationTests(unittest.TestCase):
         schema = client.get("/openapi.json").json()
         self.assertEqual(schema["servers"], [{"url": "http://testserver"}])
         self.assertIn("/v1/check-market", schema["paths"])
+        check = schema["paths"]["/v1/check-market"]["post"]
+        self.assertIn("market` as an object", check["description"])
+        self.assertIn("404", check["responses"])
+        market_schema = schema["components"]["schemas"]["CheckMarketRequest"]
+        self.assertIn("market", market_schema["required"])
+        self.assertIn("venue and market_id", market_schema["properties"]["market"]["description"])
+        cross = schema["paths"]["/v1/cross-venue-edge"]["post"]
+        self.assertIn("left` and `right", cross["description"])
+        self.assertIn("503", cross["responses"])
+        calibration = schema["paths"]["/v1/calibration"]["get"]
+        self.assertEqual(calibration["operationId"], "rwoo_get_calibration")
+        self.assertIn("CalibrationResponse", json.dumps(calibration))
         self.assertEqual(schema["paths"]["/v1/signals"]["post"]["operationId"],
                          "rwoo_best_signals")
 

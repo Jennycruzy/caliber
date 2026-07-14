@@ -15,6 +15,7 @@ from typing import Any
 # branch on.
 ERROR_CODES: dict[str, int] = {
     "INVALID_REQUEST": 400,
+    "IDEMPOTENCY_CONFLICT": 409,
     "MARKET_NOT_FOUND": 404,
     "UNSUPPORTED_VENUE": 400,
     "UNSUPPORTED_MARKET": 422,
