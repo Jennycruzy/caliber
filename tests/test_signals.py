@@ -126,6 +126,29 @@ class SignalEndpointTests(unittest.TestCase):
         self.assertEqual(body["filters"]["domain"], "weather")
         self.assertEqual(body["filters"]["family"], "weather.hurricane_season")
 
+    def test_hurricane_signal_uses_structured_metric_not_misleading_venue_title(self):
+        data = json.loads(self.scan.read_text())
+        row = dict(data["top"][1])
+        row.update({
+            "market_id": "KXTROPSTORM-26DEC01-T20",
+            "question": "Will there be more than 20 Atlantic hurricanes in 2026?",
+            "family": "weather.hurricane_season",
+            "model_version": "noaa-seasonal-count-v2-update-aware",
+            "event_identity": {
+                "metric": "named_storms", "floor_strike": 20.0,
+                "strike_type": "greater", "target_year": 2026,
+            },
+        })
+        data["top"].append(row)
+        self.scan.write_text(json.dumps(data))
+        body = self.request("POST", "/v1/signals", json={"message": "best hurricane signals"}).json()
+        signal = body["signals"][0]
+        self.assertEqual(
+            signal["question"],
+            "Will the 2026 Atlantic season record more than 20 named storms?",
+        )
+        self.assertEqual(signal["venue_question"], row["question"])
+
     def test_natural_gas_request_filters_exact_energy_family(self):
         response = self.request("POST", "/v1/signals", json={"message": "best Henry Hub natural gas signals"})
         body = response.json()

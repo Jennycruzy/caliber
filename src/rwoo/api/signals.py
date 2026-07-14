@@ -41,6 +41,33 @@ def _daily_weather_event_elapsed(row: dict[str, Any], now: datetime) -> bool:
     return now.date() > target
 
 
+def _signal_question(row: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return an accurate structured label plus the venue's original title.
+
+    Kalshi's KXTROPSTORM title currently says "Atlantic hurricanes" even though
+    its rules and structured series bind to named storms (winds >=39 mph).  A
+    paid signal must describe the modeled metric, while retaining the venue
+    title for auditability.
+    """
+    venue_question = row.get("question")
+    identity = row.get("event_identity") or {}
+    if row.get("family") != "weather.hurricane_season":
+        return venue_question, None
+    metric = identity.get("metric")
+    label = {
+        "named_storms": "named storms",
+        "hurricanes": "hurricanes",
+        "major_hurricanes": "major hurricanes",
+    }.get(metric)
+    floor = identity.get("floor_strike")
+    year = identity.get("target_year")
+    if label is None or floor is None or year is None or identity.get("strike_type") != "greater":
+        return venue_question, None
+    threshold = int(floor) if float(floor).is_integer() else floor
+    normalized = f"Will the {year} Atlantic season record more than {threshold} {label}?"
+    return normalized, venue_question if normalized != venue_question else None
+
+
 _SPORT_FAMILY_ALIASES = {
     "sports.world_cup": ("world cup", "fifa"),
     "sports.nba": ("basketball", "nba"),
@@ -160,10 +187,12 @@ def rank_signals(*, scan: dict[str, Any] | None, calibration: dict[str, Any] | N
         eligible = bool(evidence["eligible"])
         independent = int(evidence["prospective_groups"])
         retrospective = evidence["retrospective"]
+        question, venue_question = _signal_question(row)
         accepted.append({
             "rank": 0,
             "venue": row.get("venue"), "market_id": row.get("market_id"),
-            "question": row.get("question"), "domain": row.get("domain"),
+            "question": question, "venue_question": venue_question,
+            "domain": row.get("domain"),
             "family": row.get("family"), "side": row.get("side"),
             "oracle_probability": row.get("oracle_prob"),
             "probability_interval": [row.get("prob_low"), row.get("prob_high")],
