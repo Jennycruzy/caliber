@@ -8,6 +8,12 @@ from datetime import date, datetime, timezone
 from rwoo import economic_sources
 
 
+# EIA publishes the daily observations as a weekly batch. Ten days covers the
+# documented weekly cadence plus weekends/holidays without treating a delayed
+# or missed second release as current indefinitely.
+HENRY_HUB_MAX_DATA_AGE_HOURS = 10 * 24
+
+
 def _calendar_year_ratios(series: list[tuple[date, float]], as_of: date,
                           target_year: int) -> list[tuple[int, float]]:
     """Independent historical remaining-year maxima at the same season point."""
@@ -120,6 +126,11 @@ def compute_henry_hub_annual_high_probability(
         "data_freshness": (
             datetime.now(timezone.utc).isoformat() if already_observed
             else datetime.combine(latest_date, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+        ),
+        "max_data_age_hours": HENRY_HUB_MAX_DATA_AGE_HOURS,
+        "data_freshness_policy": (
+            "latest official EIA daily observation under its weekly publication cadence; "
+            "ten-day ceiling covers weekends/holidays and fails closed after a missed release"
         ),
         "base_rate": probability, "refused": False,
     }

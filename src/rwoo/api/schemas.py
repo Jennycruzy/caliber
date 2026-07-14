@@ -183,6 +183,7 @@ class SignalResponse(_OpenModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     pagination: dict[str, Any] = Field(default_factory=dict)
     evidence_notice: str | None = None
+    receipt: ReceiptRef | None = None
 
 
 class ErrorEnvelope(_OpenModel):

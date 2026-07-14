@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
-from rwoo.engines.energy import backtest_henry_hub_annual_high, compute_henry_hub_annual_high_probability
+from rwoo import edge
+from rwoo.engines.energy import (
+    HENRY_HUB_MAX_DATA_AGE_HOURS,
+    backtest_henry_hub_annual_high,
+    compute_henry_hub_annual_high_probability,
+)
 from rwoo.domain import classify_polymarket
 from rwoo.parsers import parse_market
 from rwoo.readers.kalshi import to_canonical
@@ -60,6 +66,24 @@ class EnergyEngineTests(unittest.TestCase):
         self.assertFalse(result["refused"])
         self.assertLess(result["oracle_prob"], 1.0)
         self.assertLess(result["per_source_values"]["post_issuance_maximum"], 7.0)
+
+    def test_weekly_eia_publication_cadence_has_a_bounded_freshness_window(self):
+        market = replace(
+            make_market(venue="kalshi"),
+            resolution_time=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+        )
+        eight_days_ago = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        scheduled = edge.compute_edge(market, {
+            "oracle_prob": 0.9, "confidence": 0.8, "prob_low": 0.8, "prob_high": 0.95,
+            "data_freshness": eight_days_ago,
+            "max_data_age_hours": HENRY_HUB_MAX_DATA_AGE_HOURS,
+        })
+        generic = edge.compute_edge(market, {
+            "oracle_prob": 0.9, "confidence": 0.8, "prob_low": 0.8, "prob_high": 0.95,
+            "data_freshness": eight_days_ago,
+        })
+        self.assertNotIn("data stale", scheduled["reason"])
+        self.assertIn("data stale", generic["reason"])
 
     def test_missing_issuance_timestamp_refuses(self):
         start = date(1997, 1, 1)

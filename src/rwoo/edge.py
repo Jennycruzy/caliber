@@ -35,6 +35,7 @@ import math
 
 KALSHI_TAKER_FEE_RATE = 0.07
 DEFAULT_MAX_DATA_AGE_HOURS = 24.0
+MAX_SOURCE_SCHEDULE_AGE_HOURS = 14 * 24.0
 DEFAULT_MIN_CONFIDENCE = 0.55
 
 # Official Limitless buy-fee anchors (price -> fee fraction), quoted from
@@ -186,23 +187,27 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
     # Check 2 — is the underlying data fresh enough to trust?
     freshness = engine_result.get("data_freshness")
     if freshness:
+        max_age_hours = engine_result.get("max_data_age_hours", DEFAULT_MAX_DATA_AGE_HOURS)
         try:
+            max_age_hours = float(max_age_hours)
+            if not math.isfinite(max_age_hours) or not 0 < max_age_hours <= MAX_SOURCE_SCHEDULE_AGE_HOURS:
+                raise ValueError
             freshness_dt = datetime.fromisoformat(str(freshness).replace("Z", "+00:00"))
             age_hours = (now - freshness_dt).total_seconds() / 3600
-            if age_hours > DEFAULT_MAX_DATA_AGE_HOURS:
+            if age_hours > max_age_hours:
                 return {
                     **base,
                     "actionable": False,
                     "reason": (
                         f"data stale — source data was fetched {age_hours:.1f} hours ago, beyond "
-                        f"the {DEFAULT_MAX_DATA_AGE_HOURS:.0f}-hour limit"
+                        f"the {max_age_hours:.0f}-hour source-schedule limit"
                     ),
                 }
-        except ValueError:
+        except (TypeError, ValueError):
             return {
                 **base,
                 "actionable": False,
-                "reason": "data freshness timestamp is unparseable — cannot certify source recency",
+                "reason": "data freshness timestamp or source-schedule limit is invalid — cannot certify source recency",
             }
 
     # Check 3 — do the sources/models agree enough to call an edge?

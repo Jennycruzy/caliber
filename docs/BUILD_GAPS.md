@@ -15,7 +15,16 @@ honor the configured artifact paths. Migration selects the exact-prefix longer
 forecast ledger (14,252 records) and decision ledger (8 records), preserving
 all append-only history without rewriting records. Regression coverage verifies
 the environment-bound paths and hardened systemd write boundaries. The full
-candidate suite passes **204 tests**.
+candidate suite passes **206 tests**.
+
+The same audit fixed two adjacent release-readiness issues. API and site
+sandboxes now explicitly allow the shared ledger directory, so receipt-backed
+`check-market` and `cross-venue-edge` calls cannot fail after a release switch.
+Best Signals now creates its own hash-chained decision receipt and reuses that
+receipt for an idempotent retry. Henry Hub retains the exact EIA DHHNGSP series,
+but its freshness check now follows EIA's weekly publication of daily values:
+a bounded ten-day window covers weekends and holidays, while a missed second
+release still fails closed.
 
 ## 2026-07-14 Henry Hub v3 settlement-window correction
 

@@ -74,6 +74,21 @@ class SignalEndpointTests(unittest.TestCase):
         self.assertIsNotNone(body["signals"][0]["signal_expires_at"])
         self.assertIsNotNone(body["signals"][0]["quote_timestamp"])
         self.assertIsNotNone(body["signals"][0]["source_timestamp"])
+        self.assertIsNotNone(body["receipt"]["record_hash"])
+        verified = self.request(
+            "GET", f"/v1/receipts/{body['receipt']['record_hash']}/verify",
+        )
+        self.assertEqual(verified.status_code, 200)
+        self.assertTrue(verified.json()["ledger_valid"])
+
+    def test_signal_idempotency_reuses_the_same_receipt(self):
+        headers = {"Idempotency-Key": "signals-page-1"}
+        first = self.request("POST", "/v1/signals", headers=headers,
+                             json={"message": "best signals", "limit": 1}).json()
+        second = self.request("POST", "/v1/signals", headers=headers,
+                              json={"message": "best signals", "limit": 1}).json()
+        self.assertEqual(first["receipt"], second["receipt"])
+        self.assertEqual(self.app.state.receipt_store.verify()["record_count"], 1)
 
     def test_cursor_pages_stable_scan_results(self):
         first = self.request("POST", "/v1/signals", json={"message": "best signals", "limit": 1}).json()

@@ -46,6 +46,8 @@ class RuntimePathTests(unittest.TestCase):
             ROOT / "deploy/systemd/rwoo-closing-quotes.service",
             ROOT / "deploy/systemd/rwoo-closing-quotes-near.service",
             ROOT / "deploy/systemd/rwoo-scan.service.d/hardening.conf",
+            ROOT / "deploy/systemd/rwoo-api.service.d/shared-state.conf",
+            ROOT / "deploy/systemd/rwoo-site.service.d/shared-state.conf",
         ]
         for path in unit_paths:
             text = path.read_text(encoding="utf-8")

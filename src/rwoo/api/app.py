@@ -359,8 +359,13 @@ def _register_exception_handlers(app: FastAPI) -> None:
 def _register_routes(app: FastAPI, settings: Settings) -> None:
     # ------------------------- paid services -------------------------
     async def _best_signals(request: Request, body: SignalRequest):
+        idem = request.headers.get(IDEMPOTENCY_HEADER)
+        if idem:
+            cached = request.app.state.idempotency.get(idem)
+            if cached is not None:
+                return cached
         payload = body.model_dump()
-        enforce_payment(request, SIGNAL_SERVICE, payload)
+        payment_reference = enforce_payment(request, SIGNAL_SERVICE, payload)
         scan = services.load_json_artifact(settings.opportunity_scan_path)
         calibration = services.load_json_artifact(settings.calibration_report_path)
         ranked = rank_signals(
@@ -371,12 +376,38 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             max_spread=settings.signal_max_spread,
             cursor=body.cursor,
         )
-        return {
+        result = {
             "request_id": request.state.request_id, "service": SIGNAL_SERVICE,
             "status": "ok" if ranked["signals"] else "no_signal",
             "created_at": datetime.now(timezone.utc).isoformat(),
             **ranked,
         }
+        committed = request.app.state.receipt_store.commit({
+            "request_id": request.state.request_id,
+            "service": SIGNAL_SERVICE,
+            "request_hash": request_hash(payload),
+            "result_status": result["status"],
+            "signal_count": len(ranked["signals"]),
+            "signals": [{
+                key: signal.get(key) for key in (
+                    "venue", "market_id", "family", "side", "oracle_probability",
+                    "probability_interval", "market_probability", "spread", "entry_price",
+                    "expected_profit_per_contract", "model_version", "signal_expires_at",
+                )
+            } for signal in ranked["signals"]],
+            "scan_timestamp": (scan or {}).get("created_at"),
+            "created_at": result["created_at"],
+            "payment_reference": payment_reference,
+        })
+        result["receipt"] = {
+            "record_hash": committed.record_hash,
+            "chain_hash": committed.chain_hash,
+            "sequence": committed.sequence,
+            "verification_url": settings.verification_url(committed.record_hash),
+        }
+        if idem:
+            request.app.state.idempotency.put(idem, result)
+        return result
 
     @app.post(
         "/v1/signals", response_model=SignalResponse,
