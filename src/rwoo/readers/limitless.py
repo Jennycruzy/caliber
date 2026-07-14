@@ -237,7 +237,11 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
 
     return CanonicalMarket(
         venue="limitless",
-        market_id=str(market.get("conditionId") or market.get("id") or market.get("slug") or ""),
+        # Limitless's public single-market endpoint accepts a slug (or market
+        # address), not a Polymarket-style condition ID. Exposing conditionId
+        # here made scanner-discovered markets impossible to retrieve through
+        # /v1/check-market and /v1/cross-venue-edge.
+        market_id=str(market.get("slug") or market.get("address") or market.get("id") or ""),
         question=question,
         domain=classify_limitless(categories, tags, question, rule),
         resolution_rule=rule,
