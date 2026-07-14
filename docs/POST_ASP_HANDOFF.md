@@ -7,6 +7,11 @@ all production services use the weather v3 model. Payments target X Layer
 mainnet only and remain disabled until OKX seller credentials are installed
 securely. No testnet payment is part of this handoff.
 
+The Agentic Wallet logged in by email is the receiving wallet and the buyer-side
+TEE signer. Its X Layer address is already the configured `payTo` recipient.
+That wallet session is distinct from the server-to-broker authentication used
+by the OKX seller SDK during payment verification and settlement.
+
 ## Two workstreams continue in parallel
 
 ### A. Prove the paid oracle on mainnet
@@ -15,22 +20,25 @@ Do not enable payments until the operator installs the three OKX seller
 credential variables directly on the VPS. Do not send them through chat. Then:
 
 1. Run the complete production-compatible suite before restart.
-2. Verify the unpaid response advertises x402 v2, X Layer `eip155:196`, USD₮0,
+2. Use `GET https://api.trueodd.xyz/v1/signals` as the primary marketplace
+   review endpoint. It has safe defaults, so an unpaid body-free request can be
+   replayed byte-for-byte after payment and return the service result.
+3. Verify the unpaid response advertises x402 v2, X Layer `eip155:196`, USD₮0,
    the configured recipient, $0.01 price, and the intended timeout.
-3. Ensure the external buyer has USD₮0 plus sufficient X Layer gas; gas alone
+4. Ensure the external buyer has USD₮0 plus sufficient X Layer gas; gas alone
    is not the payment asset.
-4. From that separate client, prove unpaid request -> valid HTTP 402 -> explicitly
+5. From that separate client, prove unpaid request -> valid HTTP 402 -> explicitly
    confirmed payment -> HTTP 200 oracle response.
-5. Keep the private key only in the buyer's local environment; never copy it to
+6. Keep the private key only in the buyer's local environment; never copy it to
    the VPS, repository, request body, logs, or chat.
-6. Confirm settlement to the recipient and prove the authorization cannot be replayed.
-7. Confirm the paid response creates a linked oracle receipt.
-8. Run external health, OpenAPI, docs, TLS, and rollback smoke tests.
-9. Register the service as API/A2MCP+x402. Build A2A separately only if the
+7. Confirm settlement to the recipient and prove the authorization cannot be replayed.
+8. Confirm the paid response creates a linked oracle receipt.
+9. Run external health, OpenAPI, docs, TLS, and rollback smoke tests.
+10. Register the service as API/A2MCP+x402. Build A2A separately only if the
    chosen OKX listing type explicitly requires it.
-10. While review runs, prepare the <=90-second demo, X post with `#OKXAI`, and
+11. While review runs, prepare the <=90-second demo, X post with `#OKXAI`, and
     submission form fields.
-11. Seed genuine paid calls only through normal confirmed buyer flows; never
+12. Seed genuine paid calls only through normal confirmed buyer flows; never
     fabricate orders, revenue, reviews, or users.
 
 Required operator inputs are tracked in the callable-ASP build prompt. None may

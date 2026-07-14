@@ -263,6 +263,42 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(accepted["maxTimeoutSeconds"], 60)
         self.assertEqual(accepted["extra"], {"name": "USD₮0", "version": "1", "decimals": 6})
 
+    def test_listing_probe_get_receives_challenge_before_business_logic(self):
+        """The marketplace can probe and replay an identical body-free GET.
+
+        This is the endpoint we advertise for listing review: it has safe
+        defaults after payment, while the payment middleware must intercept
+        the initial request before any request-schema validation.
+        """
+        from x402.schemas import SupportedKind, SupportedResponse
+
+        class FakeFacilitator:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_supported(self):
+                return SupportedResponse(kinds=[SupportedKind(
+                    x402_version=2, scheme="exact", network="eip155:196",
+                )])
+
+        cfg = paid_config(
+            mode="facilitator", environment="production", network="eip155:196",
+            asset="0x779ded0c9e1022225f8e0630b35a9b54be713736",
+            asset_name="USD₮0", asset_version="1", asset_decimals=6,
+            recipient="0x38c3299ee0e771e8d0a756e1a5dd4b8a8e9930ca",
+            facilitator_url="https://web3.okx.com", okx_api_key="key",
+            okx_secret_key="secret", okx_passphrase="pass", max_timeout_seconds=300,
+        )
+        with patch("x402.http.OKXFacilitatorClient", FakeFacilitator):
+            client = paid_client(tempfile.mkdtemp(), cfg)
+            response = client.get("/v1/signals")
+
+        self.assertEqual(response.status_code, 402)
+        challenge = json.loads(base64.b64decode(response.headers["PAYMENT-REQUIRED"]))
+        self.assertEqual(challenge["x402Version"], 2)
+        self.assertEqual(challenge["resource"]["url"], "http://testserver/v1/signals")
+        self.assertEqual(challenge["accepts"][0]["payTo"], cfg.recipient)
+
 
 if __name__ == "__main__":
     unittest.main()
