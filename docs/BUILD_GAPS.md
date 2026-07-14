@@ -1,5 +1,22 @@
 # Build Gaps And Sequencing
 
+## 2026-07-14 shared runtime-state correction
+
+A production audit found that the API and scheduled workers were bound to two
+different immutable release directories. The scanner, evidence loop, and
+closing-quote collectors were running successfully, but the API was reading a
+frozen scan and calibration copy from the newer health-probe release. This made
+`/v1/signals` fail closed with `SIGNALS_STALE` even after a successful scan.
+
+Runtime artifacts now live outside immutable code releases under
+`/var/lib/rwoo`, caches live under `/var/cache/rwoo`, and every worker loads the
+same release environment file as the API. Scanner and evidence CLI defaults
+honor the configured artifact paths. Migration selects the exact-prefix longer
+forecast ledger (14,252 records) and decision ledger (8 records), preserving
+all append-only history without rewriting records. Regression coverage verifies
+the environment-bound paths and hardened systemd write boundaries. The full
+candidate suite passes **204 tests**.
+
 ## 2026-07-14 Henry Hub v3 settlement-window correction
 
 Kalshi's live `KXNGASMAX` rule counts EIA Henry Hub spot prices reported only

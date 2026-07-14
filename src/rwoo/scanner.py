@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,12 @@ EXPANSION_FAMILIES = (
     "energy.commodity_price",
     "agriculture.commodity_price",
 )
+DEFAULT_SCAN_JSON = Path(os.environ.get(
+    "RWOO_OPPORTUNITY_SCAN_PATH", "data/public/opportunity_scan_latest.json",
+))
+DEFAULT_SCAN_MD = Path(os.environ.get(
+    "RWOO_OPPORTUNITY_SCAN_MD_PATH", str(DEFAULT_SCAN_JSON.with_suffix(".md")),
+))
 
 
 def _scan_source(key: str, loader):
@@ -696,8 +703,8 @@ def _fmt_prob(value: float | None) -> str:
 def write_scan_artifacts(
     scan: dict[str, Any],
     *,
-    json_path: str | Path = "data/public/opportunity_scan_latest.json",
-    md_path: str | Path = "data/public/opportunity_scan_latest.md",
+    json_path: str | Path = DEFAULT_SCAN_JSON,
+    md_path: str | Path = DEFAULT_SCAN_MD,
 ) -> None:
     json_path = Path(json_path)
     md_path = Path(md_path)

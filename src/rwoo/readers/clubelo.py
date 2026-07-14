@@ -1,6 +1,7 @@
 """Resilient dated ClubElo reader with auditable stale-snapshot fallback."""
 import csv
 import json
+import os
 import time
 from datetime import date, timedelta
 from io import StringIO
@@ -9,7 +10,7 @@ import httpx
 
 _CACHE = {}
 _CIRCUIT_OPEN_UNTIL = 0.0
-SNAPSHOT_DIR = Path(".cache/rwoo/clubelo")
+SNAPSHOT_DIR = Path(os.environ.get("RWOO_CLUBELO_CACHE_DIR", ".cache/rwoo/clubelo"))
 
 
 def _parse(text: str, snapshot_date: date) -> list[dict]:

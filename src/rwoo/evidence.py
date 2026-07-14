@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,9 +21,15 @@ from rwoo.receipts import AppendOnlyLedger, hash_hex
 from rwoo.scanner import scan_opportunities
 from rwoo.official_outcomes import event_happened, resolve_weather_from_noaa
 
-DEFAULT_LEDGER = Path("data/receipts/forecast_evidence.jsonl")
-DEFAULT_REPORT = Path("data/public/calibration_report_latest.json")
-DEFAULT_REPORT_MD = Path("data/public/calibration_report_latest.md")
+DEFAULT_LEDGER = Path(os.environ.get(
+    "RWOO_EVIDENCE_LEDGER_PATH", "data/receipts/forecast_evidence.jsonl",
+))
+DEFAULT_REPORT = Path(os.environ.get(
+    "RWOO_CALIBRATION_REPORT_PATH", "data/public/calibration_report_latest.json",
+))
+DEFAULT_REPORT_MD = Path(os.environ.get(
+    "RWOO_CALIBRATION_REPORT_MD_PATH", str(DEFAULT_REPORT.with_suffix(".md")),
+))
 KALSHI_MARKET_URL = "https://api.elections.kalshi.com/trade-api/v2/markets/{market_id}"
 POLYMARKET_URL = "https://gamma-api.polymarket.com/markets/{market_id}"
 LIMITLESS_URL = "https://api.limitless.exchange/markets/{market_id}"

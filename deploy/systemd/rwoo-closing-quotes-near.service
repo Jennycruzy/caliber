@@ -8,6 +8,8 @@ Type=oneshot
 User=rwoo
 Group=rwoo
 WorkingDirectory=/opt/rwoo/current
+EnvironmentFile=-/etc/rwoo/rwoo.env
+EnvironmentFile=-/etc/rwoo/rwoo-release.env
 Environment=PYTHONPATH=/opt/rwoo/current/src
 ExecStart=/opt/rwoo/venv/bin/python -m rwoo.closing_quotes --mode near-close
 Nice=5
@@ -20,5 +22,4 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=/opt/rwoo/current/data
-
+ReadWritePaths=/var/lib/rwoo /var/cache/rwoo
