@@ -152,6 +152,23 @@ Still open in 2b: pin `py-sdk` to an exact commit and re-verify the mapping
 against it.
 
 ### 2c. The Variant A spike (Gate G0)
+**Runnable: `scripts/g0_spike.py`.** Configure via `.env.spike` (copy from
+`.env.spike.example`, `chmod 600`, gitignored). Jenny runs it; the throwaway key
+is never pasted into a prompt, a chat, or a shared terminal, and the script
+redacts every secret it loads.
+
+The script encodes the experiment in its own structure: `caller_stage()` holds
+the key and emits `(path, body_bytes, headers)`; `relay_stage()` takes exactly
+those three arguments and **has no parameter through which a key or credential
+could be passed**. If a future edit needs to add one, Variant A has failed. L1/L2
+conventions come from `py-clob-client` verbatim rather than being reimplemented,
+because a subtly wrong HMAC serialisation is the exact failure this gate exists
+to catch.
+
+    python scripts/g0_spike.py --pick-market   # no key needed
+    python scripts/g0_spike.py --dry-run       # default; no POST
+    python scripts/g0_spike.py --live          # rests a real order
+
 Throwaway wallet, own funds, sub-dollar size, off the production box.
 Prove, in order:
 - Caller-computed L2 HMAC survives relay by a third-party server byte-identical.

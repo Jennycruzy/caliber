@@ -7,3 +7,9 @@ skills-lock.json
 .cache/
 .secrets/
 data/execution/
+# Spike secrets. The throwaway signing key lives here and is never committed,
+# never printed, and never read by anything but scripts/g0_spike.py.
+.env.spike
+.env
+*.env
+!*.env.example
