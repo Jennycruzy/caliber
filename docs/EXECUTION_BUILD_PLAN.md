@@ -169,6 +169,31 @@ to catch.
     python scripts/g0_spike.py --dry-run       # default; no POST
     python scripts/g0_spike.py --live          # rests a real order
 
+**SDK evidence for Variant A — verified 2026-07-22 against `py-clob-client`
+0.34.6.** The design is not merely possible, it is the pattern the SDK is built
+around:
+
+- `RequestArgs` carries an optional **`serialized_body`**, and
+  `create_level_2_headers` *prefers* it over re-rendering `body` — its own
+  comment says "for deterministic signing".
+- `ClobClient.post_order` then sends `data=request_args.serialized_body`.
+
+So the SDK already signs and transmits the identical string by construction.
+Separating "who serialises + signs" from "who transmits" is a supported split,
+which is exactly what Variant A needs.
+
+**Trap found while validating the spike (would have produced a false NEGATIVE on
+this gate):** the HMAC covers `timestamp + method + path + body_string`, and the
+SDK renders that string with `json.dumps(..., separators=(",", ":"),
+ensure_ascii=False)`. A default `json.dumps` emits `", "` / `": "` instead. Sign
+one, post the other, and auth fails — which reads as *"the venue rejects relayed
+orders"* when it is really our own serialisation bug. The spike now takes the
+string from the SDK path verbatim.
+
+**Smoke-tested end to end 2026-07-22** with a disposable zero-funds key against
+the live CLOB: L2 derivation, order signing, and header construction all pass;
+only the funded POST remains.
+
 Throwaway wallet, own funds, sub-dollar size, off the production box.
 Prove, in order:
 - Caller-computed L2 HMAC survives relay by a third-party server byte-identical.

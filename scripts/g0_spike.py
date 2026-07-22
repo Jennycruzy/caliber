@@ -208,21 +208,40 @@ def caller_stage(env: dict[str, str]) -> tuple[str, bytes, dict[str, str]]:
     ))
     ok("order signed locally; the private key never leaves this function")
 
-    step("4", "CALLER: serialise ONCE and compute L2 headers over those bytes")
-    # This is the crux of Variant A. The body is serialised exactly once. The
-    # same object is used to build the HMAC and is then frozen to bytes. If the
-    # relay ever re-serialises, the HMAC will not verify server-side.
+    step("4", "CALLER: serialise ONCE and compute L2 headers over that exact string")
+    # THE CRUX OF VARIANT A.
+    #
+    # The L2 HMAC is computed over `timestamp + method + path + body`, where the
+    # body contribution is a *string*. The server reconstructs that string from
+    # the bytes it receives. So the signed string and the posted bytes must be
+    # identical, character for character.
+    #
+    # py-clob-client anticipates exactly this: RequestArgs carries an optional
+    # `serialized_body`, and create_level_2_headers prefers it over re-rendering
+    # `body`. post_order then sends `data=request_args.serialized_body`. Sign and
+    # send are the same string by construction — which is the whole of Variant A.
+    #
+    # The separators matter. json.dumps defaults to ", " / ": " and the SDK uses
+    # ",", ":" — signing one and posting the other fails auth and would look
+    # like "the venue rejects relayed orders" when it is really our own bug.
     from py_clob_client.headers.headers import create_level_2_headers
-    from py_clob_client.clob_types import RequestArgs
+    from py_clob_client.clob_types import OrderType, RequestArgs
+    from py_clob_client.utilities import order_to_json
 
-    body = order.dict() if hasattr(order, "dict") else json.loads(json.dumps(order, default=str))
-    payload = {"order": body, "owner": creds.api_key, "orderType": "GTC"}
+    body = order_to_json(order, creds.api_key, OrderType.GTC)
+    serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
 
-    request_args = RequestArgs(method="POST", request_path="/order", body=payload)
+    request_args = RequestArgs(
+        method="POST",
+        request_path="/order",
+        body=body,
+        serialized_body=serialized,
+    )
     headers = create_level_2_headers(client.signer, creds, request_args)
 
-    body_bytes = json.dumps(payload).encode()
+    body_bytes = serialized.encode("utf-8")
     ok(f"body frozen: {len(body_bytes)} bytes, sha256={hashlib.sha256(body_bytes).hexdigest()[:16]}…")
+    ok("HMAC computed over the identical string that will be transmitted")
     ok(f"headers computed by the CALLER: {sorted(headers)}")
 
     return "/order", body_bytes, dict(headers)
@@ -258,6 +277,8 @@ def relay_stage(host: str, path: str, body_bytes: bytes, headers: dict[str, str]
 
     if not live:
         warn("--dry-run: not posting. Re-run with --live to complete the proof.")
+        print(f"\n   body preview (first 200 chars of the exact signed string):")
+        print(f"     {body_bytes[:200].decode('utf-8', 'replace')}")
         print("\n   Would POST:")
         print(f"     {host}{path}")
         print(f"     headers: {sorted(headers)}")
