@@ -1,0 +1,58 @@
+{
+  "accepting_order_timestamp": "2025-11-27T17:27:15Z",
+  "accepting_orders": true,
+  "active": true,
+  "archived": false,
+  "closed": false,
+  "condition_id": "0x0e7b7cc2649466ce6dfed9cf49611630fe986b31fba84ec01107e0a50f1534bb",
+  "description": "This market will resolve to \"Yes\" if the Fully Diluted Valuation of Extended's token is greater than the value specified in the title 1 day after launch. Otherwise, the market will resolve to \"No.\"\n\nThe token must be actively, publicly transferable and tradable to be considered a launch.\n\nThe FDV will be determined using the total token supply multiplied by the token price.\n\n\"1 day after launch\" is defined as 4:00 PM ET on the calendar day following launch. The resolution source for this market is the most liquid price source available. If Extended (https://x.com/extendedapp) doesn't launch a token by December 31, 2026, 11:59 PM ET, this market will resolve to \"No\".",
+  "enable_order_book": true,
+  "end_date_iso": "2027-01-01T00:00:00Z",
+  "fpmm": "",
+  "game_start_time": null,
+  "icon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/will-extended-launch-a-token-by-D5bpW_p-APnZ.jpg",
+  "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/will-extended-launch-a-token-by-D5bpW_p-APnZ.jpg",
+  "is_50_50_outcome": false,
+  "maker_base_fee": 1000,
+  "market_slug": "extended-fdv-above-3b-one-day-after-launch-437-271-658",
+  "minimum_order_size": 5,
+  "minimum_tick_size": 0.001,
+  "neg_risk": false,
+  "neg_risk_market_id": "",
+  "neg_risk_request_id": "",
+  "notifications_enabled": true,
+  "question": "Extended FDV above $3B one day after launch?",
+  "question_id": "0x08f0771e012143d6915e6003bf17df3a84521571600eacc670dd9406ca52f55a",
+  "rewards": {
+    "max_spread": 4.5,
+    "min_size": 30,
+    "rates": [
+      {
+        "asset_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "rewards_daily_rate": 3
+      }
+    ]
+  },
+  "seconds_delay": 0,
+  "tags": [
+    "Crypto",
+    "FDV",
+    "Pre-Market",
+    "Extended"
+  ],
+  "taker_base_fee": 1000,
+  "tokens": [
+    {
+      "outcome": "Yes",
+      "price": 0.0175,
+      "token_id": "43187333641922996188398060383389814287787647811837308994701068387397271207198",
+      "winner": false
+    },
+    {
+      "outcome": "No",
+      "price": 0.9825,
+      "token_id": "45797567544727845868096962085578145112741840964454883912056387967717974214967",
+      "winner": false
+    }
+  ]
+}

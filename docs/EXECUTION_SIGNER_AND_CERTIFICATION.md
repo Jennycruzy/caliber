@@ -127,8 +127,14 @@ needs a named owner and a retained artifact (test run, hash, or sign-off).
 - [x] Venue auth model (L1/L2, signature types, POLY_1271 signer/funder split)
       verified against Polymarket docs — 2026-07-22.
 - [ ] `py-sdk` pinned to an exact prerelease + commit; upgrade requires review.
-- [ ] `HttpPolymarketDataSource` field mapping verified against the pinned SDK
-      (it is marked PROVISIONAL today).
+- [x] `HttpPolymarketDataSource` field mapping verified against the **live CLOB**
+      — 2026-07-22. Found and fixed a blocking defect: `_parse_market` read a
+      `tick_size` key the venue does not emit (the field is `minimum_tick_size`,
+      and it arrives as a JSON float). The tick silently resolved to `0`, which
+      would have rejected **every** order with `VENUE_CONFIG_INVALID`. Verbatim
+      venue payloads are now pinned in `tests/fixtures/` and asserted by
+      `tests/test_polymarket_live_contract.py` (16 tests). Still to do:
+      re-verify against the pinned SDK once gate A's first item lands.
 - [ ] Contract tests against a non-funded/metered venue setup pass.
 - [ ] All prices/sizes/fees are `Decimal`/base-unit end to end; no binary float
       reaches signing or tick validation.

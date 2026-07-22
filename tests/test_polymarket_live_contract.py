@@ -1,0 +1,151 @@
+"""Contract tests against *captured live* Polymarket CLOB payloads.
+
+The hand-built fixtures in ``test_polymarket_adapter.py`` are useful for
+exercising branches, but they encode what we *assumed* the venue returns. They
+passed while ``_parse_market`` read a ``tick_size`` key that Polymarket does not
+emit — the resulting zero tick would have rejected every real order.
+
+The JSON in ``tests/fixtures/`` is a verbatim capture from the live CLOB
+(2026-07-22). These tests exist so a wrong assumption about the wire format
+fails here instead of at the first funded order. Re-capture when the venue
+changes; do not hand-edit the fixtures to make a test pass.
+"""
+from __future__ import annotations
+
+import json
+import unittest
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+from rwoo.adapters.polymarket import (
+    ALLOWED_TICK_SIZES,
+    _parse_book,
+    _parse_market,
+    tick_from_venue,
+    validate_order,
+)
+from rwoo.execution import ExecutionError
+
+FIXTURES = Path(__file__).parent / "fixtures"
+NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def load(name: str) -> dict:
+    return json.loads((FIXTURES / name).read_text())
+
+
+class LiveMarketContractTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = load("polymarket_live_market.json")
+
+    def test_venue_does_not_emit_a_tick_size_key(self):
+        # Regression guard. If this ever fails the venue changed its schema and
+        # the parser's fallback ordering must be re-verified, not just widened.
+        self.assertNotIn("tick_size", self.payload)
+        self.assertIn("minimum_tick_size", self.payload)
+
+    def test_tick_is_parsed_exactly_and_is_not_zero(self):
+        snapshot = _parse_market(self.payload, NOW)
+        self.assertEqual(snapshot.tick_size, Decimal("0.001"))
+        self.assertGreater(snapshot.tick_size, 0)
+
+    def test_tick_arrives_as_a_float_and_still_lands_exact(self):
+        self.assertIsInstance(self.payload["minimum_tick_size"], float)
+        self.assertEqual(_parse_market(self.payload, NOW).tick_size, Decimal("0.001"))
+
+    def test_missing_tick_is_refused_rather_than_defaulted_to_zero(self):
+        payload = {k: v for k, v in self.payload.items() if k != "minimum_tick_size"}
+        with self.assertRaises(ExecutionError) as ctx:
+            _parse_market(payload, NOW)
+        self.assertEqual(ctx.exception.code, "VENUE_CONFIG_INVALID")
+
+    def test_outcomes_are_title_case_on_the_wire_and_normalize_to_yes_no(self):
+        outcomes = [t["outcome"] for t in self.payload["tokens"]]
+        self.assertEqual(sorted(outcomes), ["No", "Yes"])
+        self.assertEqual(set(_parse_market(self.payload, NOW).tokens), {"YES", "NO"})
+
+    def test_integer_minimum_order_size_is_accepted(self):
+        self.assertIsInstance(self.payload["minimum_order_size"], int)
+        self.assertEqual(_parse_market(self.payload, NOW).minimum_order_size, Decimal("5"))
+
+    def test_neg_risk_flag_is_carried_through(self):
+        self.assertIs(_parse_market(self.payload, NOW).neg_risk, False)
+
+
+class LiveBookContractTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = load("polymarket_live_book.json")
+
+    def test_timestamp_is_a_string_of_epoch_millis(self):
+        self.assertIsInstance(self.payload["timestamp"], str)
+        self.assertIsInstance(_parse_book(self.payload).timestamp, datetime)
+
+    def test_wire_order_is_worst_first_and_is_re_sorted(self):
+        wire_asks = [Decimal(level["price"]) for level in self.payload["asks"]]
+        self.assertEqual(wire_asks, sorted(wire_asks, reverse=True), "venue sends asks descending")
+        parsed = _parse_book(self.payload)
+        self.assertEqual(parsed.best_ask, min(wire_asks))
+        wire_bids = [Decimal(level["price"]) for level in self.payload["bids"]]
+        self.assertEqual(parsed.best_bid, max(wire_bids))
+
+    def test_book_reports_its_own_tick_as_a_decimal_string(self):
+        self.assertEqual(_parse_book(self.payload).tick_size, Decimal("0.001"))
+
+
+class LiveCrossCheckTests(unittest.TestCase):
+    """The two endpoints must agree before an order is priced."""
+
+    def setUp(self):
+        self.market = _parse_market(load("polymarket_live_market.json"), NOW)
+        self.book = _parse_book(load("polymarket_live_book.json"))
+        self.now = self.book.timestamp + timedelta(seconds=1)
+        self.intent = {
+            "side": "YES",
+            "token_id": self.market.tokens["YES"],
+            "price": "0.022",
+            "quantity": "10",
+        }
+
+    def test_real_payloads_validate_end_to_end(self):
+        assessment = validate_order(self.intent, self.market, self.book,
+                                    now=self.now, max_staleness_seconds=15)
+        self.assertEqual(assessment.best_ask, "0.02")
+
+    def test_price_off_tick_is_rejected_against_the_real_tick(self):
+        # 0.0225 is not a multiple of the live 0.001 tick. Under the old parser
+        # the tick was 0.000 and this order was rejected for the wrong reason.
+        with self.assertRaises(ExecutionError) as ctx:
+            validate_order({**self.intent, "price": "0.0225"}, self.market, self.book,
+                           now=self.now, max_staleness_seconds=15)
+        self.assertEqual(ctx.exception.code, "TICK_SIZE_VIOLATION")
+
+    def test_disagreeing_ticks_are_refused(self):
+        book = self.book.__class__(self.book.token_id, self.book.bids, self.book.asks,
+                                   self.book.timestamp, Decimal("0.01"))
+        with self.assertRaises(ExecutionError) as ctx:
+            validate_order(self.intent, self.market, book, now=self.now, max_staleness_seconds=15)
+        self.assertEqual(ctx.exception.code, "VENUE_CONFIG_INVALID")
+
+    def test_book_for_the_wrong_token_is_refused(self):
+        book = self.book.__class__("some-other-token", self.book.bids, self.book.asks,
+                                   self.book.timestamp, self.book.tick_size)
+        with self.assertRaises(ExecutionError) as ctx:
+            validate_order(self.intent, self.market, book, now=self.now, max_staleness_seconds=15)
+        self.assertEqual(ctx.exception.code, "MARKET_BINDING_MISMATCH")
+
+
+class TickAllowListTests(unittest.TestCase):
+    def test_every_documented_tick_round_trips_from_float(self):
+        for tick in ALLOWED_TICK_SIZES:
+            self.assertEqual(tick_from_venue(float(tick)), tick)
+
+    def test_undocumented_tick_is_refused(self):
+        for value in (0.005, 0.0, 1.0, "0.002"):
+            with self.assertRaises(ExecutionError) as ctx:
+                tick_from_venue(value)
+            self.assertEqual(ctx.exception.code, "INVALID_VENUE_DATA")
+
+
+if __name__ == "__main__":
+    unittest.main()

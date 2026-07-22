@@ -50,6 +50,37 @@ def to_decimal(value: Any, *, name: str) -> Decimal:
     return number
 
 
+# The venue's documented tick sizes. Verified against live CLOB 2026-07-22.
+# ``minimum_tick_size`` arrives from /markets as a JSON float, so it cannot go
+# through ``to_decimal``; this allow-list is what keeps that narrow exception
+# safe. Any value outside the set is treated as corrupt venue data.
+ALLOWED_TICK_SIZES = (Decimal("0.1"), Decimal("0.01"), Decimal("0.001"), Decimal("0.0001"))
+
+
+def tick_from_venue(value: Any, *, name: str = "tick_size") -> Decimal:
+    """Parse a venue tick size, tolerating the float that /markets returns.
+
+    ``to_decimal`` refuses binary floats because a lost digit in a price or size
+    is unrecoverable. A tick size is different: it is drawn from a tiny, known
+    set of exact values, so we can accept the float, round-trip it through
+    ``str`` (shortest round-trip repr), and then require an exact match against
+    that set. A float that does not land on a documented tick is rejected.
+    """
+    if isinstance(value, float):
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ExecutionError("INVALID_VENUE_DATA", f"{name} is not a valid decimal") from exc
+    else:
+        number = to_decimal(value, name=name)
+    if number not in ALLOWED_TICK_SIZES:
+        raise ExecutionError(
+            "INVALID_VENUE_DATA",
+            f"{name} {canonical(number)} is not a documented Polymarket tick size",
+        )
+    return number
+
+
 @dataclass(frozen=True)
 class BookLevel:
     price: Decimal
@@ -62,13 +93,17 @@ class OrderBook:
     bids: tuple[BookLevel, ...]  # best (highest price) first
     asks: tuple[BookLevel, ...]  # best (lowest price) first
     timestamp: datetime
+    # The /book endpoint independently reports the tick. Kept so the two
+    # endpoints can be cross-checked before an order is priced.
+    tick_size: Decimal | None = None
 
     @classmethod
     def build(cls, token_id: str, bids: Iterable[BookLevel], asks: Iterable[BookLevel],
-              timestamp: datetime) -> "OrderBook":
+              timestamp: datetime, tick_size: Decimal | None = None) -> "OrderBook":
+        # The venue returns both sides worst-price-first; never rely on wire order.
         ordered_bids = tuple(sorted(bids, key=lambda level: level.price, reverse=True))
         ordered_asks = tuple(sorted(asks, key=lambda level: level.price))
-        return cls(token_id, ordered_bids, ordered_asks, timestamp)
+        return cls(token_id, ordered_bids, ordered_asks, timestamp, tick_size)
 
     @property
     def best_bid(self) -> Decimal | None:
@@ -90,6 +125,10 @@ class MarketSnapshot:
     closed: bool
     accepting_orders: bool
     timestamp: datetime
+    # Negative-risk markets settle through a different exchange contract and
+    # carry different order semantics. Recorded here so the signed-order path
+    # can gate on it rather than silently treating them as ordinary binaries.
+    neg_risk: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,11 +185,21 @@ def validate_order(intent: dict[str, Any], market: MarketSnapshot, book: OrderBo
     if not expected_token or expected_token != intent.get("token_id"):
         raise ExecutionError("MARKET_BINDING_MISMATCH", f"{side} token does not match the live market binding")
 
+    # The book must be the book for the token being traded. Without this, a data
+    # source that returns the wrong book prices the order against a different
+    # market while every other check still passes.
+    if book.token_id and book.token_id != expected_token:
+        raise ExecutionError("MARKET_BINDING_MISMATCH", "order book does not belong to the order's token")
+
     price = to_decimal(intent.get("price"), name="price")
     size = to_decimal(intent.get("quantity"), name="quantity")
 
     if market.tick_size <= 0:
         raise ExecutionError("VENUE_CONFIG_INVALID", "market tick size is not positive")
+    # /markets and /book each report the tick independently. Disagreement means
+    # one of the two views is stale or wrong; refuse rather than pick a winner.
+    if book.tick_size is not None and book.tick_size != market.tick_size:
+        raise ExecutionError("VENUE_CONFIG_INVALID", "market and order book disagree on tick size")
     if price % market.tick_size != 0:
         raise ExecutionError("TICK_SIZE_VIOLATION", f"price is not a multiple of the {canonical(market.tick_size)} tick")
     if size < market.minimum_order_size:
@@ -231,16 +280,23 @@ def _parse_market(payload: dict[str, Any], now: datetime) -> MarketSnapshot:
         token_id = str(entry.get("token_id", "")).strip()
         if outcome in ("YES", "NO") and token_id:
             tokens[outcome] = token_id
+    # Verified against the live CLOB 2026-07-22: /markets returns
+    # ``minimum_tick_size`` (float), not ``tick_size``. Reading the wrong key
+    # silently yielded a zero tick, which rejected every order downstream.
+    raw_tick = payload.get("minimum_tick_size", payload.get("tick_size"))
+    if raw_tick is None:
+        raise ExecutionError("VENUE_CONFIG_INVALID", "market payload carries no tick size")
     return MarketSnapshot(
         market_id=str(payload.get("condition_id") or payload.get("market_id") or "").strip(),
         question=str(payload.get("question", "")),
         tokens=tokens,
-        tick_size=to_decimal(payload.get("tick_size", "0"), name="tick_size"),
+        tick_size=tick_from_venue(raw_tick, name="minimum_tick_size"),
         minimum_order_size=to_decimal(payload.get("minimum_order_size", "0"), name="minimum_order_size"),
         active=bool(payload.get("active", False)),
         closed=bool(payload.get("closed", True)),
         accepting_orders=bool(payload.get("accepting_orders", False)),
         timestamp=now,
+        neg_risk=bool(payload.get("neg_risk", False)),
     )
 
 
@@ -264,9 +320,11 @@ def _parse_book(payload: dict[str, Any]) -> OrderBook:
             ))
         return parsed
 
+    raw_tick = payload.get("tick_size")
     return OrderBook.build(
         str(payload.get("asset_id") or payload.get("market") or "").strip(),
         levels("bids"), levels("asks"), _parse_timestamp(payload.get("timestamp")),
+        tick_from_venue(raw_tick, name="book tick_size") if raw_tick is not None else None,
     )
 
 
