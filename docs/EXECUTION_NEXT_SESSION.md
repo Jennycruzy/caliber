@@ -251,10 +251,11 @@ First actions after resume:
    `SPIKE_JIT_MAX_APPROVAL=1`), never a default. Do NOT park a large balance in the
    deposit wallet — the JIT-to-zero discipline is what makes the unlimited approval
    safe.
-3. Re-test POLY_1271 order validation now that the deposit wallet is deployed.
-   Non-interactive EIP-712 signing, signature recovery, L2 credential creation,
-   HMAC authentication, and ERC-7739 digest equivalence are proven. Distinguish
-   an allowance rejection from a signer rejection.
+3. POLY_1271 order signing is now live-proven through the Agentic Wallet adapter.
+   The CLOB accepted the signer/auth/order shape and reached the exact allowance
+   check, rejecting only because Exchange V2 allowance was zero. See
+   `docs/evidence/G3_AGENTIC_WALLET_ORDER_SIGNING_2026-07-23.md`. An accepted
+   rest-and-cancel remains pending until an allowed approval path exists.
 4. Keep TrueOdds builder credentials on the integration/server side. Buyer L2
    credentials cannot create builder credentials and must never receive the
    TrueOdds builder secret.
