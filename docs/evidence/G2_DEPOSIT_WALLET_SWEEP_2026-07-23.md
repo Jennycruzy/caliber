@@ -1,9 +1,7 @@
-# G2 — Deposit-wallet pUSD sweep (withdrawal batch) — PENDING
+# G2 — Deposit-wallet pUSD sweep (withdrawal batch) — CONFIRMED
 
 Date: 2026-07-23
-Status: **PENDING LIVE RUN** — this file is a template. Do not treat the placeholder
-values below as confirmed. Fill them from a real `--execute` run on a
-non-geoblocked host, then change Status to `CONFIRMED` or `FAILED`.
+Status: **CONFIRMED**
 
 ## Purpose
 
@@ -49,31 +47,34 @@ with real exposure capped at one order's notional and no Polymarket business ask
 python scripts/agentic_polymarket_sweep_test.py --execute
 ```
 
-## Result (fill from the run)
+## Result
 
-- relayer transaction id: `<PENDING>`
-- Polygon transaction: `<PENDING>`
-- receipt status: `<PENDING — expect 0x1>`
-- deposit wallet before: `<PENDING>` pUSD
-- deposit wallet after: `<PENDING>` pUSD
-- recipient (owner) before: `<PENDING>` pUSD
-- recipient (owner) after: `<PENDING>` pUSD
-- recipient delta: `<PENDING — must equal 0.100000 pUSD>`
-- wallet delta: `<PENDING — 0.100000 pUSD, or more if the relayer skims a fee>`
-- relayer fee taken from collateral, if any: `<PENDING>`
+- relayer transaction id: `019f9043-614f-779a-ab13-eefe632ec920`
+- Polygon transaction:
+  `0x73e0643fc50ab89963c41e9e30991d70b7dc3fa782b85db76303d12da41b2339`
+- relayer state: `STATE_CONFIRMED`
+- receipt status: `0x1`
+- deposit wallet before: `2.391351 pUSD`
+- deposit wallet after: `2.291351 pUSD`
+- recipient (owner) before: `0.000000 pUSD`
+- recipient (owner) after: `0.100000 pUSD`
+- recipient delta: `0.100000 pUSD`
+- wallet delta: `0.100000 pUSD`
+- relayer fee taken from collateral: `0.000000 pUSD`
 
-## Interpretation (fill from the run)
+The script printed:
 
-- [ ] `withdrawal batch permitted` — the deposit wallet can push pUSD to its owner
+`SWEEP CONFIRMED: the deposit wallet can withdraw pUSD via a WALLET batch.`
+
+## Interpretation
+
+- [x] `withdrawal batch permitted` — the deposit wallet can push pUSD to its owner
   via a relayer WALLET batch. **Unblocks the JIT sweep leg.**
-- [ ] signer re-confirmed over a WALLET transfer batch (not just an approval).
-- [ ] JIT sizing note: subtract any observed relayer fee when computing how much
-  to sweep vs. leave for gas.
+- [x] signer re-confirmed over a WALLET transfer batch.
+- [x] no pUSD relayer fee was observed; the wallet debit exactly matched the
+  recipient credit.
 
-If the batch is instead **rejected**, record the exact relayer/API error here.
-A rejection would mean withdrawals are gated separately from orders, which both
-kills the autonomous sweep and answers the custodial "trade-only" question in the
-opposite direction — see the Open blocker in
-[`../EXECUTION_NEXT_SESSION.md`](../EXECUTION_NEXT_SESSION.md).
+This proves the sweep leg only. It does not alter the zero exchange allowance or
+by itself certify entry orders, fills, SELL orders, take-profit, or stop-loss.
 
 No key, secret, HMAC, or signed body is recorded in this file.

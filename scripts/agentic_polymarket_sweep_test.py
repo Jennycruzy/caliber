@@ -53,7 +53,12 @@ def _pusd_balance(rpc_url: str, address: str) -> int:
         ],
     }).encode("utf-8")
     req = urllib.request.Request(
-        rpc_url, data=body, headers={"content-type": "application/json"}
+        rpc_url,
+        data=body,
+        headers={
+            "content-type": "application/json",
+            "user-agent": "trueodds-agentic-polymarket-sweep/1",
+        },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read())
