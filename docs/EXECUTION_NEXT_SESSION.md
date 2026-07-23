@@ -16,10 +16,14 @@ The ASP is now a non-custodial Polymarket execution-assist design:
 
 Done so far:
 
-- `scripts/g0_spike.py` live-proved the caller-signed relay path against
-  Polymarket CLOB using POLY_1271 deposit wallet, pUSD collateral, CTF Exchange
-  V2, and relayer-managed deposit-wallet approval. A real order was accepted and
-  then cancelled.
+- `scripts/g0_spike.py` exercised the caller-signed relay path using the local
+  `.env.spike` private-key backend, POLY_1271 deposit wallet, pUSD collateral,
+  CTF Exchange V2, and relayer-managed deposit-wallet approval. On 2026-07-23
+  the venue accepted the byte-identical relayed order (HTTP 200), returned order
+  ID `0xc1072646a124d8f7a21f5bdecd214347174cababe943b9864443899a75db05eb`,
+  and the caller cancelled it with zero matched size. Sanitized acceptance and
+  cancellation evidence is retained in
+  [`evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md`](evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md).
 - `src/rwoo/signed_relay.py` accepts `body_base64 + headers`, validates the order
   economics against the prepared intent, and relays the exact original bytes.
 - `src/rwoo/execution.py` persists one-shot signed body hashes in
@@ -32,12 +36,14 @@ Done so far:
 - `src/rwoo/adapters/polymarket.py` is updated from old USDC.e/V1 assumptions to
   pUSD/V2/POLY_1271 settlement metadata.
 - `scripts/polymarket_agent_helper.py` is the caller-side helper. The
-  `local-private-key` backend can set up, sign, and submit. The
+  `local-private-key` backend is live-proven for setup, signing, byte-identical
+  relay, and cancellation. The
   `okx-agentic-wallet` backend currently produces a no-private-key funding plan
   but is not yet allowed to execute because order signing is still unverified.
 - Stablecoin funding routes are declared for direct pUSD, Polygon USDC.e,
-  Polygon native USDC, Polygon USDT, and X Layer USDT via OKX cross-chain into
-  the caller's Polymarket bridge deposit address.
+  Polygon native USDC, Polygon USDT, and the normal autonomous ASP route:
+  X Layer USDT/USDT0 via OKX cross-chain into the caller's Polymarket bridge
+  deposit address.
 - The Polymarket bridge minimum (2.5 USDT, `BRIDGE_MIN_DEPOSIT_UNITS =
   2_500_000`) is now published on every bridge route in `funding_routes()` and
   enforced in one place, `_bridge_units()`, in the caller helper. Below the floor
@@ -105,7 +111,9 @@ wallet session for all required operations:
 
 1. read the caller EVM address;
 2. derive or accept the caller's Polymarket POLY_1271 deposit wallet;
-3. fund pUSD from Polygon pUSD/USDC.e/native USDC/USDT or bridge X Layer USDT;
+3. fund pUSD by routing the caller's X Layer USDT/USDT0 through OKX/onchainos
+   into the caller-owned Polymarket bridge deposit address; Polygon
+   pUSD/USDC.e/native USDC/USDT remain fallback/setup routes;
 4. deploy/approve the Polymarket deposit wallet as needed;
 5. create or derive Polymarket L2 credentials;
 6. sign the POLY_1271 order exactly as CLOB expects;
@@ -116,7 +124,7 @@ live end to end with the Agentic Wallet. Items 5-6 are not yet verified with OKX
 Agentic Wallet. The SDK path used in the live spike assumes a local private key
 signer; an Agentic Wallet signer adapter must be built around
 `onchainos wallet sign-message --type eip712` and tested against CLOB before
-this can be shipped.
+this can be shipped and certified from a lawfully supported region.
 
 Test wallet, logged in 2026-07-23 (external test identity, deliberately **not**
 the okx.ai registration account):
@@ -160,7 +168,8 @@ London host, so the answer depends on where the machine is egressing from.
    check whether X Layer gas is needed or whether `wallet gas-station` covers it.
 3. Bridge autonomously:
    `python scripts/polymarket_agent_helper.py --intent-file <prepared.json>
-   --wallet-backend okx-agentic-wallet --source-asset xlayer-usdt --execute`.
+   --wallet-backend okx-agentic-wallet --source-asset xlayer-usdt --execute`
+   (or `xlayer-usdt0` when that is the funded balance).
    This resolves the owner from the session, derives the deposit wallet, floors
    the amount, bridges, and waits for the pUSD credit. It then stops before
    signing by design.

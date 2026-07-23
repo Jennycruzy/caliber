@@ -131,31 +131,42 @@ def _post_submit_signed(url: str, payload: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _xlayer_usdt_to_polymarket_deposit(g0, env: dict, intent: dict) -> None:
+def _xlayer_stable_symbol(source_asset: str, env: dict) -> str:
+    if env.get("SPIKE_XLAYER_STABLE_SYMBOL"):
+        return env["SPIKE_XLAYER_STABLE_SYMBOL"].lower()
+    if source_asset == "xlayer-usdt0":
+        return "usdt0"
+    return "usdt"
+
+
+def _xlayer_usdt_to_polymarket_deposit(g0, env: dict, intent: dict, source_asset: str) -> None:
     from eth_account import Account
 
     owner = Account.from_key(env["SPIKE_PRIVATE_KEY"]).address
     wallet = env["SPIKE_FUNDER_ADDRESS"]
     amount = _bridge_units(g0, intent)
     bridge_address = g0._polymarket_bridge_deposit_address(env, wallet)
+    stable = _xlayer_stable_symbol(source_asset, env)
     command = [
         "onchainos", "cross-chain", "execute",
-        "--from", "usdt",
-        "--to", "usdt",
+        "--from", stable,
+        "--to", stable,
         "--from-chain", "xlayer",
         "--to-chain", "polygon",
         "--readable-amount", g0._units(amount),
         "--wallet", env.get("SPIKE_OKX_WALLET_ADDRESS", owner),
         "--receive-address", bridge_address.lower(),
     ]
-    g0.step("0x", "SETUP: bridging X Layer USDT to caller's Polymarket deposit address")
+    g0.step("0x", f"SETUP: routing X Layer {stable.upper()} to caller's Polymarket deposit address")
     print("   " + " ".join(command))
     subprocess.run(command, check=True)
-    g0._wait_for_wallet_pusd(env, wallet, _required_units(intent), "X Layer USDT bridge")
+    g0._wait_for_wallet_pusd(env, wallet, _required_units(intent), f"X Layer {stable.upper()} route")
 
 
-def _agentic_wallet_bridge_fund(g0, env: dict, intent: dict) -> None:
-    """Fund the caller's deposit wallet from X Layer USDT with no private key.
+def _agentic_wallet_bridge_fund(
+    g0, env: dict, intent: dict, source_asset: str
+) -> None:
+    """Fund the caller's deposit wallet from X Layer USDT/USDT0 with no private key.
 
     Every transaction here is signed by the caller's own Agentic Wallet session
     through the OnchainOS CLI. Nothing in this function has, derives, or needs
@@ -165,20 +176,26 @@ def _agentic_wallet_bridge_fund(g0, env: dict, intent: dict) -> None:
     owner = _agentic_wallet_owner()
     amount = _bridge_units(g0, intent)
     bridge_address = g0._polymarket_bridge_deposit_address(env, wallet)
+    stable = _xlayer_stable_symbol(source_asset, env)
     command = [
         "onchainos", "cross-chain", "execute",
-        "--from", "usdt",
-        "--to", "usdt",
+        "--from", stable,
+        "--to", stable,
         "--from-chain", "xlayer",
         "--to-chain", "polygon",
         "--readable-amount", g0._units(amount),
         "--wallet", owner,
         "--receive-address", bridge_address.lower(),
     ]
-    g0.step("0x", "SETUP: bridging X Layer USDT via Agentic Wallet (no private key)")
+    g0.step(
+        "0x",
+        f"SETUP: routing X Layer {stable.upper()} via Agentic Wallet (no private key)",
+    )
     print("   " + " ".join(command))
     subprocess.run(command, check=True)
-    g0._wait_for_wallet_pusd(env, wallet, _required_units(intent), "X Layer USDT bridge")
+    g0._wait_for_wallet_pusd(
+        env, wallet, _required_units(intent), f"X Layer {stable.upper()} route"
+    )
 
 
 def _funding_plan(g0, env: dict, intent: dict, prepared: dict, source_asset: str, asp_url: str | None) -> dict:
@@ -193,7 +210,7 @@ def _funding_plan(g0, env: dict, intent: dict, prepared: dict, source_asset: str
         "one_flow": True,
         "custody": "source transactions, order signing, and L2 headers are created by the caller-side helper only",
     }
-    if source_asset == "xlayer-usdt":
+    if source_asset in ("xlayer-usdt", "xlayer-usdt0"):
         bridge_address = g0._polymarket_bridge_deposit_address(env, env["SPIKE_FUNDER_ADDRESS"])
         amount = _bridge_units(g0, intent)
         # State the floor and the amount actually being sent. A plan that shows
@@ -209,16 +226,19 @@ def _funding_plan(g0, env: dict, intent: dict, prepared: dict, source_asset: str
             "amount": g0._units(amount),
             "floored_to_minimum": amount > _required_units(intent),
         }
+        stable = _xlayer_stable_symbol(source_asset, env)
         plan["route"] = {
             "type": "okx_cross_chain_then_polymarket_bridge_credit",
             "command": [
                 "onchainos", "cross-chain", "execute",
-                "--from", "usdt", "--to", "usdt",
+                "--from", stable, "--to", stable,
                 "--from-chain", "xlayer", "--to-chain", "polygon",
                 "--readable-amount", g0._units(amount),
                 "--wallet", env.get("SPIKE_OKX_WALLET_ADDRESS", "<caller-wallet>"),
                 "--receive-address", bridge_address.lower(),
             ],
+            "accepted_source_symbols": ["USDT", "USDT0"],
+            "selected_source_symbol": stable.upper(),
             "then": "wait for pUSD in caller_deposit_wallet, sign POLY_1271 order, call submit-signed",
         }
     else:
@@ -246,8 +266,8 @@ def main() -> None:
     parser.add_argument("--deposit-wallet-address",
                         help="caller Polymarket POLY_1271 deposit wallet; avoids private-key derivation in planning mode")
     parser.add_argument("--source-asset", default="auto",
-                        choices=["auto", "polygon", "polygon-pusd", "polygon-usdce", "polygon-usdc", "polygon-usdt", "xlayer-usdt"],
-                        help="caller funding source; auto handles Polygon pUSD/USDC.e/native USDC/USDT")
+                        choices=["auto", "polygon", "polygon-pusd", "polygon-usdce", "polygon-usdc", "polygon-usdt", "xlayer-usdt", "xlayer-usdt0"],
+                        help="caller funding source; X Layer USDT and USDT0 both route through OKX/onchainos")
     parser.add_argument("--funding-plan", action="store_true",
                         help="print machine-readable funding/sign/submit plan instead of executing")
     args = parser.parse_args()
@@ -280,12 +300,13 @@ def main() -> None:
                              separators=(",", ":")))
             return
         if args.setup or args.execute:
-            if args.source_asset != "xlayer-usdt":
+            if args.source_asset not in ("xlayer-usdt", "xlayer-usdt0"):
                 raise SystemExit(
                     f"okx-agentic-wallet autonomous funding currently implements "
-                    f"--source-asset xlayer-usdt, not {args.source_asset!r}"
+                    f"--source-asset xlayer-usdt or xlayer-usdt0, not "
+                    f"{args.source_asset!r}"
                 )
-            _agentic_wallet_bridge_fund(g0, env, intent)
+            _agentic_wallet_bridge_fund(g0, env, intent, args.source_asset)
         # Funding is done and the deposit wallet is credited. Signing is the only
         # step this backend cannot do yet, so it is the only step that refuses.
         raise SystemExit(
@@ -308,8 +329,8 @@ def main() -> None:
         print(json.dumps(_funding_plan(g0, env, intent, prepared, args.source_asset, args.asp_url), separators=(",", ":")))
         return
 
-    if args.execute and args.source_asset == "xlayer-usdt":
-        _xlayer_usdt_to_polymarket_deposit(g0, env, intent)
+    if args.execute and args.source_asset in ("xlayer-usdt", "xlayer-usdt0"):
+        _xlayer_usdt_to_polymarket_deposit(g0, env, intent, args.source_asset)
 
     if args.setup or args.execute:
         spender = _spender_for_token(env, intent["token_id"])

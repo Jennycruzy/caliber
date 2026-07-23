@@ -33,9 +33,10 @@ Prepared and inspected Polymarket intents include `client_execution`, a
 machine-readable package for caller agents:
 
 - `target_collateral`: pUSD on Polygon.
-- `funding_routes`: direct pUSD, Polygon USDC.e onramp, Polygon native USDC,
-  Polygon USDT, and X Layer USDT via OKX cross-chain into the caller's
-  Polymarket bridge deposit address. Every bridge route carries
+- `funding_routes`: the normal autonomous route is X Layer USDT/USDT0 via OKX
+  cross-chain into the caller's Polymarket bridge deposit address. Direct pUSD,
+  Polygon USDC.e onramp, Polygon native USDC, and Polygon USDT remain
+  fallback/setup routes. Every bridge route carries
   `minimum_deposit` (2.5, or 2500000 base units). The bridge credits no pUSD
   below that floor and returns no error, so the floor is published rather than
   left to be discovered; the caller helper sizes every transfer at
@@ -98,8 +99,8 @@ requires:
 
 1. a verified OKX Agentic Wallet signer backend for Polymarket L2 credential
    creation and POLY_1271 order signatures;
-2. live tiny-amount tests for Polygon USDC.e, native USDC, Polygon USDT, and
-   X Layer USDT funding into caller-owned pUSD;
+2. live tiny-amount tests for X Layer USDT/USDT0 funding into caller-owned pUSD,
+   plus fallback tests for Polygon USDC.e, native USDC, and Polygon USDT;
 3. account-stream plus REST reconciliation, startup recovery, and settlement
    accounting;
 4. global exposure, correlated-event, daily-loss, and kill-switch policy state;

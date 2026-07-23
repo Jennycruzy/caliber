@@ -19,6 +19,8 @@ OKX Agentic Wallet email-session backend is not yet certified for Polymarket
 order signing. Agentic Wallet funding/bridge operations are the intended caller
 path; the remaining work is to prove CLOB L2 credential creation and POLY_1271
 order signing through that wallet session without a raw private key.
+The sanitized raw-key acceptance/cancellation artifact is
+[`evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md`](evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md).
 
 The reviewed external data, backtesting, research-agent, and Polymarket
 execution repositories are classified in

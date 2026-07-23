@@ -50,9 +50,9 @@ FUNDING
 Polymarket CLOB V2 settles in pUSD on Polygon. The direct on-chain onramp wraps
 USDC.e into pUSD. If a caller holds native Polygon USDC or Polygon USDT, the
 caller-side setup can route that token through the caller's own Polymarket bridge
-deposit address, which credits pUSD to the caller's deposit wallet. X Layer USDT
-should be bridged caller-side with OKX/onchainos into that same Polymarket EVM
-deposit address. TrueOdds never receives the funds or the key.
+deposit address, which credits pUSD to the caller's deposit wallet. X Layer
+USDT/USDT0 should be routed caller-side with OKX/onchainos into that same
+Polymarket EVM deposit address. TrueOdds never receives the funds or the key.
 
 SECRETS
 -------
@@ -597,8 +597,8 @@ def setup_deposit_wallet(env: dict[str, str], required_units: int, spender: str)
                     die(
                         f"EOA pUSD {_units(eoa_pusd)}, USDC.e {_units(eoa_usdce)}, "
                         f"and bridgeable Polygon balances ({', '.join(balances)}) are below setup need. "
-                        "For X Layer USDT, run scripts/polymarket_agent_helper.py "
-                        "--funding-plan --source-asset xlayer-usdt and execute that route locally."
+                        "For X Layer USDT/USDT0, run scripts/polymarket_agent_helper.py "
+                        "--funding-plan --source-asset xlayer-usdt or xlayer-usdt0 and execute that route locally."
                     )
     else:
         ok("deposit wallet collateral is sufficient")

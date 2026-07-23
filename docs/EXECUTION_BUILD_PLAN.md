@@ -70,8 +70,11 @@ suggests it may be the correct posture for Polymarket too.
 This remains a business/legal decision, not an engineering workaround. However,
 it no longer means G0 is technically unproven: on 2026-07-23 a later live run
 proved byte-identical caller-signed relay with POLY_1271/pUSD/V2, and the live
-test order was cancelled. The next engineering blocker is the OKX Agentic Wallet
-backend, not the raw-key spike.
+test order was cancelled with zero matched size. The order ID, acceptance
+response, cancellation response, and final status are retained in
+[`evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md`](evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md).
+The next engineering blocker is the OKX Agentic Wallet backend, not the raw-key
+spike.
 
 ---
 
@@ -363,13 +366,16 @@ coverage is done for all three; only execution is Polymarket-first.
 ## Open items
 
 - [x] Variant chosen: **A** (caller-supplied L2 headers, zero secrets at rest) — 2026-07-22.
-- [x] G0: Variant A proven against live CLOB with POLY_1271/pUSD/V2, then live order cancelled — 2026-07-23.
+- [x] G0: Variant A proven against live CLOB with POLY_1271/pUSD/V2, then live
+  order cancelled with zero matched size — 2026-07-23. Evidence:
+  [`docs/evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md`](evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md).
 - [x] ASP `submit-signed`: accepts caller-signed opaque body bytes + L2 headers,
       validates order economics against prepared intent, relays byte-identical,
       and burns body hash for replay protection — 2026-07-23.
 - [x] Settlement metadata updated from old USDC.e/V1 assumptions to
-      pUSD/V2/POLY_1271, with funding routes for direct pUSD, Polygon USDC.e,
-      Polygon native USDC, Polygon USDT, and X Layer USDT via OKX bridge.
+      pUSD/V2/POLY_1271, with the normal autonomous funding route declared as
+      X Layer USDT/USDT0 via OKX bridge, and Polygon pUSD/USDC.e/native
+      USDC/USDT kept as fallback/setup routes.
 - [ ] OKX Agentic Wallet signer backend: email/API-key session can fund/bridge,
       but Polymarket L2 credential creation and POLY_1271 order signing are not
       yet live-tested without a raw private key.

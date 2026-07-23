@@ -19,10 +19,12 @@ Current state (as of last review):
 - Step 2 — custodial/operator signer: **not started**. No production key exists.
 - Caller-signed ASP relay: `submit-signed` is implemented and live-proven with a
   local private-key spike. This is non-custodial because the caller signs and the
-  ASP only relays signed bytes.
-- OKX Agentic Wallet backend: funding/bridge session is the intended normal ASP
-  caller path, but Polymarket L2 credential creation and POLY_1271 order signing
-  through an email/API-key Agentic Wallet session are not yet live-tested.
+  ASP only relays signed bytes. Acceptance and cancellation evidence is in
+  [`evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md`](evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md).
+- OKX Agentic Wallet backend: X Layer USDT/USDT0 funding/bridge session is the
+  intended normal ASP caller path, but Polymarket L2 credential creation and
+  POLY_1271 order signing through an email/API-key Agentic Wallet session are
+  not yet live-tested.
 - Production `RWOO_EXECUTION_MODE` remains `disabled`.
 
 ## 0. Current ASP execution path

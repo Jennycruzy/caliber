@@ -147,11 +147,11 @@ class PreTradeAssessment:
 #
 # A caller who is going to sign their own order has to fund and approve the
 # right things first. Current deposit-wallet / CTF Exchange V2 execution uses
-# pUSD collateral. Agents that arrive with USDC.e can wrap through
-# CollateralOnramp.wrap(asset, to, amount), with ``to`` set to their deposit
-# wallet. Agents that arrive with native USDC/USDT should route funds into the
-# caller's own Polymarket bridge address, which credits pUSD to that same
-# caller wallet. None of these routes sends funds through TrueOdds.
+# pUSD collateral. The normal ASP route for autonomous OKX Agentic Wallet
+# callers is X Layer USDT/USDT0 routed through OKX/onchainos into the caller's
+# own Polymarket bridge address, which credits pUSD to that same caller wallet.
+# Polygon pUSD/USDC.e/USDC/USDT remain setup and fallback routes. None of these
+# routes sends funds through TrueOdds.
 #
 # So the contract address is the authority and the symbol is a human label.
 # Addresses verified against Polymarket deposit-wallet/pUSD docs and
@@ -292,9 +292,10 @@ def funding_routes() -> list[dict[str, Any]]:
             "source": {
                 "chain": f"eip155:{XLAYER_CHAIN_ID}",
                 "chain_alias": "xlayer",
+                "symbols": ["USDT", "USDT0"],
                 "symbol": "USDT",
                 "decimals": 6,
-                "address_resolution": "onchainos token map: usdt on xlayer",
+                "address_resolution": "use live onchainos wallet balance/token map; choose whichever funded X Layer stablecoin alias is present",
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "okx_cross_chain_to_polymarket_evm_deposit_address",
@@ -302,8 +303,8 @@ def funding_routes() -> list[dict[str, Any]]:
             "route": [
                 "POST https://bridge.polymarket.com/deposit with the caller deposit wallet",
                 "Use returned address.evm as OKX --receive-address",
-                "onchainos cross-chain execute --from usdt --to usdt --from-chain xlayer --to-chain polygon --receive-address <polymarket_evm_deposit_address>",
-                "Polymarket bridge converts the Polygon USDT arrival into pUSD for the caller deposit wallet",
+                "onchainos cross-chain execute --from <usdt-or-usdt0> --to <usdt-or-usdt0> --from-chain xlayer --to-chain polygon --receive-address <polymarket_evm_deposit_address>",
+                "Polymarket bridge converts the Polygon USDT/USDT0 arrival into pUSD for the caller deposit wallet",
             ],
             "autonomous_helper": "--funding-plan --source-asset xlayer-usdt",
         },
