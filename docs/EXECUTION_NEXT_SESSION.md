@@ -209,3 +209,47 @@ London host, so the answer depends on where the machine is egressing from.
 
 Rotate the VPS root password shared in chat. Do not enable funded execution on
 the production VPS (8 GB, no swap, prior OOM).
+# Urgent resume checkpoint — 2026-07-23
+
+The OKX Agentic Wallet X Layer test is **partial, with funds already sent**.
+Read
+`docs/evidence/G1_OKX_AGENTIC_WALLET_XLAYER_PARTIAL_2026-07-23.md`
+before doing anything.
+
+Do not log in again, re-fund, or repeat the bridge. The source transaction
+succeeded and 2.5 USD₮0 was deducted:
+
+- approval:
+  `0x897d07d3b836b8d9b3eca56e06e6e8d78eb7e78496df583a60f76d09cf94db17`
+- MESON bridge:
+  `0x4008e6a2809071ebf59b6ba238121923a41c411b3ab4c219c46f9906ceb73843`
+- bridge ID: `223`
+- source chain: X Layer `196`
+- receiver/deposit wallet:
+  `0x577108052c8D862984B724668E2f6035Eb6Fa5c5`
+
+At handoff, Agentic Wallet history reported the source bridge transaction
+`SUCCESS`, but OKX cross-chain status returned `NOT_FOUND` and the Polygon pUSD
+balance was still zero. The remaining X Layer balance is only `1.719665` USD₮0,
+below the route minimum.
+
+First actions after resume:
+
+1. Check the existing transaction, without resending:
+   `onchainos cross-chain status --tx-hash 0x4008e6a2809071ebf59b6ba238121923a41c411b3ab4c219c46f9906ceb73843 --bridge-id 223 --from-chain 196`
+2. Check Polygon pUSD directly for the deposit wallet.
+3. If delivered, record the destination transaction and credited amount in the
+   G1 evidence file. If `NOT_FOUND` persists, inspect MESON/explorer state and
+   escalate that exact source transaction to OKX/MESON. Do not send another
+   2.5-token transfer.
+4. Verify the exact approval allowance is now zero; revoke only if a nonzero
+   allowance remains.
+5. Continue the signer adapter. ClobAuth EIP-712 signing already works, but L2
+   credential creation and the ERC-1271/ERC-7739 order-signing path remain to be
+   proven.
+6. Only after pUSD credit, order acceptance, and cancellation are proven may
+   `okx_agentic_wallet` be changed to `executable`.
+
+Implementation correction still required: enforce/publish the 2.5 minimum only
+for the X Layer USDT/USD₮0 route. Normal EVM/Polygon bridge routes have no such
+minimum.
