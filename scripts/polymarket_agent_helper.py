@@ -42,6 +42,36 @@ def _required_units(intent: dict) -> int:
     return int(Decimal(intent["price"]) * Decimal(intent["quantity"]) * Decimal(10 ** 6))
 
 
+def _bridge_units(g0, intent: dict) -> int:
+    """Amount to send through the bridge, floored at the bridge minimum.
+
+    Sizing from the order notional alone underfunds any order below the floor,
+    and the bridge neither credits pUSD nor reports an error when that happens.
+    Every bridge call sizes through here so no path can skip the floor.
+    """
+    return max(_required_units(intent), g0.POLYMARKET_BRIDGE_MIN_UNITS)
+
+
+def _agentic_wallet_owner() -> str:
+    """Read the caller's EVM address from the logged-in Agentic Wallet session.
+
+    No private key is involved: the address is session state held by OnchainOS.
+    """
+    result = subprocess.run(
+        ["onchainos", "wallet", "addresses", "--chain", "xlayer"],
+        check=True, capture_output=True, text=True,
+    )
+    payload = json.loads(result.stdout)
+    if not payload.get("ok"):
+        raise SystemExit(f"onchainos wallet addresses failed: {payload}")
+    entries = (payload.get("data") or {}).get("xlayer") or []
+    if not entries:
+        raise SystemExit(
+            "no X Layer address in the Agentic Wallet session; run `onchainos wallet login` first"
+        )
+    return entries[0]["address"]
+
+
 def _derive_deposit_wallet_for_owner(g0, owner: str) -> str:
     from eth_utils import to_checksum_address
     from py_builder_relayer_client.builder.derive import (
@@ -106,7 +136,7 @@ def _xlayer_usdt_to_polymarket_deposit(g0, env: dict, intent: dict) -> None:
 
     owner = Account.from_key(env["SPIKE_PRIVATE_KEY"]).address
     wallet = env["SPIKE_FUNDER_ADDRESS"]
-    amount = max(_required_units(intent), g0.POLYMARKET_BRIDGE_MIN_UNITS)
+    amount = _bridge_units(g0, intent)
     bridge_address = g0._polymarket_bridge_deposit_address(env, wallet)
     command = [
         "onchainos", "cross-chain", "execute",
@@ -119,6 +149,33 @@ def _xlayer_usdt_to_polymarket_deposit(g0, env: dict, intent: dict) -> None:
         "--receive-address", bridge_address.lower(),
     ]
     g0.step("0x", "SETUP: bridging X Layer USDT to caller's Polymarket deposit address")
+    print("   " + " ".join(command))
+    subprocess.run(command, check=True)
+    g0._wait_for_wallet_pusd(env, wallet, _required_units(intent), "X Layer USDT bridge")
+
+
+def _agentic_wallet_bridge_fund(g0, env: dict, intent: dict) -> None:
+    """Fund the caller's deposit wallet from X Layer USDT with no private key.
+
+    Every transaction here is signed by the caller's own Agentic Wallet session
+    through the OnchainOS CLI. Nothing in this function has, derives, or needs
+    key material, so it is safe to run unattended for an ASP buyer.
+    """
+    wallet = env["SPIKE_FUNDER_ADDRESS"]
+    owner = _agentic_wallet_owner()
+    amount = _bridge_units(g0, intent)
+    bridge_address = g0._polymarket_bridge_deposit_address(env, wallet)
+    command = [
+        "onchainos", "cross-chain", "execute",
+        "--from", "usdt",
+        "--to", "usdt",
+        "--from-chain", "xlayer",
+        "--to-chain", "polygon",
+        "--readable-amount", g0._units(amount),
+        "--wallet", owner,
+        "--receive-address", bridge_address.lower(),
+    ]
+    g0.step("0x", "SETUP: bridging X Layer USDT via Agentic Wallet (no private key)")
     print("   " + " ".join(command))
     subprocess.run(command, check=True)
     g0._wait_for_wallet_pusd(env, wallet, _required_units(intent), "X Layer USDT bridge")
@@ -138,7 +195,20 @@ def _funding_plan(g0, env: dict, intent: dict, prepared: dict, source_asset: str
     }
     if source_asset == "xlayer-usdt":
         bridge_address = g0._polymarket_bridge_deposit_address(env, env["SPIKE_FUNDER_ADDRESS"])
-        amount = max(_required_units(intent), g0.POLYMARKET_BRIDGE_MIN_UNITS)
+        amount = _bridge_units(g0, intent)
+        # State the floor and the amount actually being sent. A plan that shows
+        # only the sent amount looks like an unexplained mismatch with the order
+        # notional, which is exactly when a caller "corrects" it downward.
+        plan["minimum_deposit"] = {
+            "base_units": str(g0.POLYMARKET_BRIDGE_MIN_UNITS),
+            "amount": g0._units(g0.POLYMARKET_BRIDGE_MIN_UNITS),
+            "note": "bridge credits no pUSD below this and reports no error",
+        }
+        plan["send_amount"] = {
+            "base_units": str(amount),
+            "amount": g0._units(amount),
+            "floored_to_minimum": amount > _required_units(intent),
+        }
         plan["route"] = {
             "type": "okx_cross_chain_then_polymarket_bridge_credit",
             "command": [
@@ -182,31 +252,47 @@ def main() -> None:
                         help="print machine-readable funding/sign/submit plan instead of executing")
     args = parser.parse_args()
 
-    if args.wallet_backend == "okx-agentic-wallet" and not args.funding_plan:
-        raise SystemExit(
-            "okx-agentic-wallet backend is declared for ASP clients but the "
-            "POLY_1271 order-signing adapter is not implemented yet; use "
-            "--funding-plan or local-private-key until that adapter is verified"
-        )
-
+    # Funding and order signing are separate capabilities and are gated
+    # separately. Bridging needs only the wallet session, which the Agentic
+    # Wallet already provides, so it runs unattended for an ASP buyer. Order
+    # signing needs a POLY_1271 adapter that is not built yet, so only that step
+    # refuses. Gating both behind one flag made buyers do funding by hand for a
+    # reason that never applied to funding.
     g0 = _load_spike_module()
     prepared = _prepared_response(args.intent_file)
     intent = _prepared_intent(prepared)
 
-    if args.wallet_backend == "okx-agentic-wallet" and args.funding_plan:
-        if not args.deposit_wallet_address and not args.owner_address:
-            raise SystemExit(
-                "--owner-address or --deposit-wallet-address is required for "
-                "okx-agentic-wallet funding plans; get it from `onchainos wallet addresses`"
-            )
+    if args.wallet_backend == "okx-agentic-wallet":
+        # The owner address is session state, so resolve it from the logged-in
+        # wallet rather than making the caller paste it. An explicit flag still
+        # wins, which keeps planning usable without a live session.
+        owner = args.owner_address
+        if not owner and not args.deposit_wallet_address:
+            owner = _agentic_wallet_owner()
         env = {
             "SPIKE_CHAIN_ID": "137",
             "SPIKE_FUNDER_ADDRESS": (
-                args.deposit_wallet_address or _derive_deposit_wallet_for_owner(g0, args.owner_address or "")
+                args.deposit_wallet_address or _derive_deposit_wallet_for_owner(g0, owner or "")
             ),
         }
-        print(json.dumps(_funding_plan(g0, env, intent, prepared, args.source_asset, args.asp_url), separators=(",", ":")))
-        return
+        if args.funding_plan:
+            print(json.dumps(_funding_plan(g0, env, intent, prepared, args.source_asset, args.asp_url),
+                             separators=(",", ":")))
+            return
+        if args.setup or args.execute:
+            if args.source_asset != "xlayer-usdt":
+                raise SystemExit(
+                    f"okx-agentic-wallet autonomous funding currently implements "
+                    f"--source-asset xlayer-usdt, not {args.source_asset!r}"
+                )
+            _agentic_wallet_bridge_fund(g0, env, intent)
+        # Funding is done and the deposit wallet is credited. Signing is the only
+        # step this backend cannot do yet, so it is the only step that refuses.
+        raise SystemExit(
+            "funding complete via Agentic Wallet. POLY_1271 order signing through "
+            "the Agentic Wallet session is not implemented yet, so this run stops "
+            "before signing; use --funding-plan to emit the remaining steps"
+        )
 
     g0.ENV_PATH = Path(args.env_file)
     env = g0.load_env()

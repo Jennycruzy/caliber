@@ -1,6 +1,7 @@
 *.pyc
 __pycache__/
 .venv/
+.venv-spike/
 *.egg-info/
 .agents/
 skills-lock.json

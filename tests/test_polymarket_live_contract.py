@@ -182,6 +182,42 @@ class SettlementRequirementsTests(unittest.TestCase):
         self.assertEqual(routes["xlayer-usdt-okx-to-polymarket-bridge"]["destination"],
                          "caller_poly_1271_deposit_wallet")
 
+    def test_every_bridge_route_publishes_the_minimum_deposit(self):
+        # A caller sizing from the order notional alone underfunds any order
+        # below the floor, and the bridge credits nothing and reports nothing.
+        # The floor has to reach the caller as data on every bridge route.
+        req = self.build(self.market)
+        routes = {route["id"]: route for route in req["funding_routes"]}
+        bridge_ids = [
+            "polygon-usdc-bridge",
+            "polygon-usdt-bridge",
+            "xlayer-usdt-okx-to-polymarket-bridge",
+        ]
+        for route_id in bridge_ids:
+            with self.subTest(route=route_id):
+                minimum = routes[route_id]["minimum_deposit"]
+                self.assertEqual(minimum["base_units"], "2500000")
+                self.assertEqual(minimum["amount"], "2.5")
+                self.assertEqual(minimum["decimals"], 6)
+        # Non-bridge routes do not go near the bridge and must not claim a floor.
+        self.assertNotIn("minimum_deposit", routes["polygon-pusd-direct"])
+        self.assertNotIn("minimum_deposit", routes["polygon-usdce-onramp"])
+
+    def test_spike_bridge_minimum_does_not_drift_from_the_adapter(self):
+        # scripts/g0_spike.py keeps a standalone copy so it can run without the
+        # package importable. Two copies of a funding floor is exactly the kind
+        # of duplication that silently rots, so pin them together.
+        import importlib.util
+        from pathlib import Path
+
+        from rwoo.adapters.polymarket import BRIDGE_MIN_DEPOSIT_UNITS
+
+        spike_path = Path(__file__).resolve().parents[1] / "scripts" / "g0_spike.py"
+        spec = importlib.util.spec_from_file_location("g0_spike_drift_check", spike_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.POLYMARKET_BRIDGE_MIN_UNITS, BRIDGE_MIN_DEPOSIT_UNITS)
+
     def test_allowance_spender_follows_the_market_type(self):
         import dataclasses
         normal = self.build(self.market)["required_allowances"][0]

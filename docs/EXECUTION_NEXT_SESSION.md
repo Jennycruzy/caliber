@@ -38,6 +38,14 @@ Done so far:
 - Stablecoin funding routes are declared for direct pUSD, Polygon USDC.e,
   Polygon native USDC, Polygon USDT, and X Layer USDT via OKX cross-chain into
   the caller's Polymarket bridge deposit address.
+- The Polymarket bridge minimum (2.5 USDT, `BRIDGE_MIN_DEPOSIT_UNITS =
+  2_500_000`) is now published on every bridge route in `funding_routes()` and
+  enforced in one place, `_bridge_units()`, in the caller helper. Below the floor
+  the bridge credits no pUSD **and reports no error**, so a caller sizing from
+  the order notional alone would stall with nothing to debug.
+- Agentic Wallet funding and bridging now run unattended. Funding and order
+  signing are gated separately: bridging needs only the wallet session, which
+  the Agentic Wallet already provides, so only order signing refuses.
 
 Verification completed:
 
@@ -65,10 +73,29 @@ Whether a Polymarket deposit-wallet **session signer can be contract-enforced to
 trade-only** (refuse `WALLET` batch withdrawals) is UNRESOLVED and the evidence
 **leans against** it (one authorization set appears to gate both CLOB orders and
 withdrawals). This only matters for the *custodial* model; the non-custodial
-ASP path above does not depend on it. To settle: read the deposit-wallet
-**implementation** contract source (not the factory
-`0x00000000000Fb5C9ADea0298D729A0CB3823Cc07`) or get written confirmation from
-Polymarket.
+ASP path above does not depend on it.
+
+The implementation address needed to settle it is now known — 2026-07-23. It was
+not findable by public search because the deployed wallets are **beacon**
+proxies, not the UUPS implementation the SDK config advertises:
+
+```text
+factory              0x00000000000Fb5C9ADea0298D729A0CB3823Cc07
+beacon               0x7a18edfe055488a3128f01f563e5b479d92ffc3a
+LIVE implementation  0xf7f27c29e60fe6325bef8da7f93250353d2e3294   <- read this
+SDK uups config      0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB   <- NOT this
+```
+
+Resolved by calling `UpgradeableBeacon.implementation()` (`0x5c60da1b`) on the
+factory's beacon; the result holds 20,858 bytes of deployed code. Read
+`isValidSignature` and the `WALLET` batch authorization there. Reading the SDK's
+UUPS address answers the question about the wrong contract.
+
+The same beacon/UUPS split decides the deposit-wallet address. When the UUPS
+address has no code, `_derive_deposit_wallet_for_owner` falls through to
+`derive_beacon_deposit_wallet`, and the two derivations return **different
+addresses for the same owner**. Always derive through the helper, never through
+`derive_uups_deposit_wallet` alone.
 
 ## Current blocker: Agentic Wallet backend test
 
@@ -84,39 +111,73 @@ wallet session for all required operations:
 6. sign the POLY_1271 order exactly as CLOB expects;
 7. call ASP `submit-signed`.
 
-Items 1-4 are straightforward through OnchainOS wallet/cross-chain commands.
-Items 5-6 are not yet verified with OKX Agentic Wallet. The SDK path used in the
-live spike assumes a local private key signer; an Agentic Wallet signer adapter
-must be built around the wallet's EVM/EIP-712 signing primitive and tested
-against CLOB before this can be shipped.
+Items 1-4 are implemented and run unattended, but have **not** yet been proven
+live end to end with the Agentic Wallet. Items 5-6 are not yet verified with OKX
+Agentic Wallet. The SDK path used in the live spike assumes a local private key
+signer; an Agentic Wallet signer adapter must be built around
+`onchainos wallet sign-message --type eip712` and tested against CLOB before
+this can be shipped.
 
-Local OnchainOS status on 2026-07-23:
+Test wallet, logged in 2026-07-23 (external test identity, deliberately **not**
+the okx.ai registration account):
 
-```json
-{"loggedIn": false, "accountCount": 0}
+```text
+email            kingsjanet0@gmail.com
+owner EVM/XLayer 0x48ddC64e362e337b1eaEA67486A9F8c2869eAF38
+deposit wallet   0x577108052c8D862984B724668E2f6035Eb6Fa5c5   (beacon-derived)
 ```
 
-So the next live test needs an OKX Agentic Wallet login in this local OnchainOS
-session. Do not put a private key in chat or `.env` for this path.
+Do not put a private key in chat or `.env` for this path.
 
-## Next actions (pick up here)
+### Where this can and cannot be tested
 
-1. Log into OKX Agentic Wallet locally with email and verification code, then run
-   `onchainos wallet status` and `onchainos wallet addresses --chain polygon`.
-2. Build the Agentic Wallet signer adapter for Polymarket CLOB auth/order
-   signing. Do not mark it executable until a tiny live rest-and-cancel order is
-   accepted.
-3. Test the funding routes with tiny amounts:
-   Polygon USDC.e -> pUSD direct onramp, Polygon native USDC/USDT -> Polymarket
-   bridge deposit, and X Layer USDT -> OKX cross-chain -> Polymarket bridge
-   deposit -> pUSD.
-4. After Agentic Wallet signing is verified, switch
+OnchainOS auth on CLI 4.3.0 is **browser social login** (`--phase init` → `open`
+→ `poll`). There is no email/OTP flag and no API-key session flag; older docs
+describing `wallet login <email> --locale` do not match the shipped CLI. The
+session then persists in `~/.onchainos/keyring.enc`, so the one browser step is
+per-machine bootstrap and everything after it is unattended.
+
+Codespaces reports `onchainos wallet geoblock` → `{"blocked":true}`. Signing is
+host-independent and works there (it hits OKX, not Polymarket), but L2 credential
+creation, `bridge.polymarket.com`, and order submission are all Polymarket-facing
+and will not certify from a blocked host. Build the adapter anywhere; certify it
+from the Mac.
+
+## Next actions (pick up here — on the Mac)
+
+Certify on the Mac: it is the host where the funded private-key G0 run
+completed and the order was accepted and cancelled. Confirm its geoblock status
+at the time of the run rather than assuming it — `d067f93` recorded a 403 from a
+London host, so the answer depends on where the machine is egressing from.
+
+1. Log the Agentic Wallet into OnchainOS on the Mac. `onchainos wallet login`
+   prints a URL; open it, sign in as `kingsjanet0@gmail.com`, then
+   `onchainos wallet login --phase poll`. Confirm with `wallet status` and
+   `wallet geoblock` — the latter must report `{"blocked":false}` before any
+   Polymarket-facing step.
+2. Fund `0x48ddC64e362e337b1eaEA67486A9F8c2869eAF38` on **X Layer** with USDT or
+   USDT0, at least **2.5** (the bridge floor). The wallet starts at zero, so
+   check whether X Layer gas is needed or whether `wallet gas-station` covers it.
+3. Bridge autonomously:
+   `python scripts/polymarket_agent_helper.py --intent-file <prepared.json>
+   --wallet-backend okx-agentic-wallet --source-asset xlayer-usdt --execute`.
+   This resolves the owner from the session, derives the deposit wallet, floors
+   the amount, bridges, and waits for the pUSD credit. It then stops before
+   signing by design.
+4. Build the Agentic Wallet signer adapter on
+   `onchainos wallet sign-message --type eip712 --chain polygon --from <owner>`.
+   Prove L2 credential creation first (`ClobAuthDomain`, chainId 137) — it needs
+   no funds — then the POLY_1271 order signature. The open question is whether
+   the wallet's EIP-712 output satisfies the deposit wallet's ERC-1271
+   `isValidSignature` and the ERC-7739 wrapping the v2 SDK applies.
+5. Do not mark the backend executable until a tiny live rest-and-cancel order is
+   accepted through it. Then switch
    `client_execution.wallet_backends[].status` for `okx_agentic_wallet` from
-   `funding_ready_order_signing_adapter_pending` to `executable` and allow
-   `scripts/polymarket_agent_helper.py --wallet-backend okx-agentic-wallet
-   --execute`.
-5. Only if going custodial multi-funder: resolve the trade-only contract
-   question + legal counsel first.
+   `funding_ready_order_signing_adapter_pending` to `executable`.
+6. Test the remaining funding routes with tiny amounts: Polygon USDC.e -> pUSD
+   direct onramp, and Polygon native USDC/USDT -> Polymarket bridge deposit.
+7. Only if going custodial multi-funder: resolve the trade-only contract
+   question at `0xf7f27c29e60fe6325bef8da7f93250353d2e3294` + legal counsel first.
 
 ## Standing reminder
 

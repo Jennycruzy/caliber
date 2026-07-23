@@ -173,6 +173,15 @@ NATIVE_USDC_NOT_COLLATERAL = NATIVE_USDC_POLYGON
 POLYMARKET_BRIDGE_BASE_URL = "https://bridge.polymarket.com"
 XLAYER_CHAIN_ID = 196
 
+# The Polymarket bridge silently holds deposits below its floor: the funds are
+# not lost, but no pUSD is credited and the caller sees a stall with no error.
+# A caller who sizes the transfer from the order notional alone will underfund a
+# small order and have nothing to debug, so the floor is published in every
+# bridge route rather than left to be discovered. ``scripts/g0_spike.py`` keeps
+# its own copy for standalone use; ``tests/test_polymarket_live_contract.py``
+# asserts the two never drift.
+BRIDGE_MIN_DEPOSIT_UNITS = 2_500_000
+
 # The allowance spender depends on the market: negative-risk markets settle
 # through a different V2 exchange contract. Polymarket's relayer requires
 # MaxUint256 approval from the deposit wallet to the selected exchange.
@@ -182,6 +191,25 @@ EXCHANGE_BY_MARKET_TYPE = {
 }
 
 SIGNATURE_TYPES = {0: "EOA", 1: "POLY_PROXY", 2: "GNOSIS_SAFE", 3: "POLY_1271"}
+
+
+def bridge_minimum_deposit() -> dict[str, Any]:
+    """The floor a bridge route must send, in base units and human units.
+
+    Published as data, not prose, so a caller agent can size its transfer
+    against it before sending rather than after the deposit stalls.
+    """
+    amount = Decimal(BRIDGE_MIN_DEPOSIT_UNITS) / Decimal(10 ** COLLATERAL["decimals"])
+    return {
+        "base_units": str(BRIDGE_MIN_DEPOSIT_UNITS),
+        "amount": canonical(amount),
+        "decimals": COLLATERAL["decimals"],
+        "applies_to": "the amount sent to the bridge deposit address, not the order notional",
+        "below_minimum_behaviour": (
+            "the bridge credits no pUSD and raises no error; size every transfer "
+            "at max(order_notional, this minimum)"
+        ),
+    }
 
 
 def funding_routes() -> list[dict[str, Any]]:
@@ -228,6 +256,7 @@ def funding_routes() -> list[dict[str, Any]]:
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "polymarket_bridge_deposit",
+            "minimum_deposit": bridge_minimum_deposit(),
             "bridge": {
                 "base_url": POLYMARKET_BRIDGE_BASE_URL,
                 "create_deposit": "POST /deposit",
@@ -248,6 +277,7 @@ def funding_routes() -> list[dict[str, Any]]:
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "polymarket_bridge_deposit",
+            "minimum_deposit": bridge_minimum_deposit(),
             "bridge": {
                 "base_url": POLYMARKET_BRIDGE_BASE_URL,
                 "create_deposit": "POST /deposit",
@@ -268,6 +298,7 @@ def funding_routes() -> list[dict[str, Any]]:
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "okx_cross_chain_to_polymarket_evm_deposit_address",
+            "minimum_deposit": bridge_minimum_deposit(),
             "route": [
                 "POST https://bridge.polymarket.com/deposit with the caller deposit wallet",
                 "Use returned address.evm as OKX --receive-address",

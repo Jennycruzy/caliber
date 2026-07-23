@@ -35,7 +35,11 @@ machine-readable package for caller agents:
 - `target_collateral`: pUSD on Polygon.
 - `funding_routes`: direct pUSD, Polygon USDC.e onramp, Polygon native USDC,
   Polygon USDT, and X Layer USDT via OKX cross-chain into the caller's
-  Polymarket bridge deposit address.
+  Polymarket bridge deposit address. Every bridge route carries
+  `minimum_deposit` (2.5, or 2500000 base units). The bridge credits no pUSD
+  below that floor and returns no error, so the floor is published rather than
+  left to be discovered; the caller helper sizes every transfer at
+  `max(order_notional, minimum)`.
 - `wallet_backends`: currently `local_private_key` is executable for the live
   spike; `okx_agentic_wallet` is declared as
   `funding_ready_order_signing_adapter_pending`.
