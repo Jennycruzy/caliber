@@ -215,6 +215,7 @@ def rank_signals(*, scan: dict[str, Any] | None, calibration: dict[str, Any] | N
             "question": question, "venue_question": venue_question,
             "domain": row.get("domain"),
             "family": row.get("family"), "side": row.get("side"),
+            "event_group_id": row.get("event_group_id"),
             "oracle_probability": row.get("oracle_prob"),
             "probability_interval": [row.get("prob_low"), row.get("prob_high")],
             "market_probability": row.get("implied_prob"), "spread": row.get("spread"),

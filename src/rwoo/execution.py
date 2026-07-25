@@ -129,7 +129,43 @@ class ExecutionStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(intent_id) REFERENCES execution_intents(intent_id)
                 );
+                CREATE TABLE IF NOT EXISTS execution_buyers (
+                    buyer_id TEXT PRIMARY KEY, address TEXT NOT NULL UNIQUE,
+                    kill_switch_active INTEGER NOT NULL DEFAULT 0,
+                    kill_switch_reason TEXT, kill_switch_updated_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS execution_signal_refs (
+                    signal_id TEXT PRIMARY KEY, buyer_id TEXT NOT NULL,
+                    payload TEXT NOT NULL, expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(buyer_id) REFERENCES execution_buyers(buyer_id)
+                );
+                CREATE TABLE IF NOT EXISTS buyer_control_nonces (
+                    buyer_id TEXT NOT NULL, nonce TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(buyer_id, nonce),
+                    FOREIGN KEY(buyer_id) REFERENCES execution_buyers(buyer_id)
+                );
+                CREATE TABLE IF NOT EXISTS signed_cancel_submissions (
+                    body_hash TEXT PRIMARY KEY, buyer_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(buyer_id) REFERENCES execution_buyers(buyer_id)
+                );
             """)
+            existing = {
+                row["name"] for row in db.execute("PRAGMA table_info(execution_intents)").fetchall()
+            }
+            for name, declaration in (
+                ("buyer_id", "TEXT"),
+                ("signal_id", "TEXT"),
+                ("signal_expires_at", "TEXT"),
+                ("exit_policy", "TEXT"),
+                ("position_id", "TEXT"),
+                ("order_direction", "TEXT"),
+            ):
+                if name not in existing:
+                    db.execute(f"ALTER TABLE execution_intents ADD COLUMN {name} {declaration}")
 
     @staticmethod
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -223,16 +259,123 @@ class ExecutionStore:
                 (body_hash,),
             ).fetchone() is not None
 
+    def buyer(self, address: str) -> dict[str, Any]:
+        normalized = address.lower()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as db:
+            buyer_id = f"byr_{uuid.uuid4().hex}"
+            db.execute(
+                "INSERT OR IGNORE INTO execution_buyers(buyer_id,address,created_at) VALUES(?,?,?)",
+                (buyer_id, normalized, now),
+            )
+            row = db.execute(
+                "SELECT * FROM execution_buyers WHERE address=?", (normalized,)
+            ).fetchone()
+        if not row:
+            raise ExecutionError("BUYER_NOT_FOUND", "buyer could not be created")
+        return dict(row)
+
+    def create_signal_ref(
+        self, buyer_id: str, payload: dict[str, Any], expires_at: str
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        signal_id = f"sig_{uuid.uuid4().hex}"
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO execution_signal_refs(signal_id,buyer_id,payload,expires_at,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (signal_id, buyer_id, json.dumps(payload, sort_keys=True), expires_at, now),
+            )
+        return {
+            "signal_id": signal_id,
+            "buyer_id": buyer_id,
+            "payload": payload,
+            "expires_at": expires_at,
+        }
+
+    def signal_ref(self, signal_id: str, buyer_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM execution_signal_refs WHERE signal_id=? AND buyer_id=?",
+                (signal_id, buyer_id),
+            ).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["payload"] = json.loads(value["payload"])
+        return value
+
+    def buyer_intents(self, buyer_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            ids = [
+                row["intent_id"] for row in db.execute(
+                    "SELECT intent_id FROM execution_intents WHERE buyer_id=? ORDER BY created_at",
+                    (buyer_id,),
+                ).fetchall()
+            ]
+        return [intent for intent_id in ids if (intent := self.get(intent_id))]
+
+    def set_kill_switch(self, buyer_id: str, *, active: bool, reason: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            updated = db.execute(
+                "UPDATE execution_buyers SET kill_switch_active=?,kill_switch_reason=?,"
+                "kill_switch_updated_at=? WHERE buyer_id=?",
+                (1 if active else 0, reason, now, buyer_id),
+            )
+            if updated.rowcount != 1:
+                raise ExecutionError("BUYER_NOT_FOUND", "buyer was not found")
+        return self.buyer_by_id(buyer_id)
+
+    def buyer_by_id(self, buyer_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM execution_buyers WHERE buyer_id=?", (buyer_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def consume_control_nonce(self, buyer_id: str, nonce: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO buyer_control_nonces(buyer_id,nonce,created_at) VALUES(?,?,?)",
+                    (buyer_id, nonce, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ExecutionError("CONTROL_REPLAY", "buyer control authorization was already used") from exc
+
+    def set_position_id(self, intent_id: str, position_id: str) -> None:
+        """Link an intent to its PositionStore position after creation."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE execution_intents SET position_id=?,updated_at=? WHERE intent_id=?",
+                (position_id, datetime.now(timezone.utc).isoformat(), intent_id),
+            )
+
+    def reserve_signed_cancel(self, buyer_id: str, body_hash: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO signed_cancel_submissions(body_hash,buyer_id,created_at) VALUES(?,?,?)",
+                    (body_hash, buyer_id, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ExecutionError("SIGNED_CANCEL_REPLAY", "signed cancellation was already used") from exc
+
 
 class ExecutionCoordinator:
     def __init__(self, store: ExecutionStore, *, mode: str = "disabled",
-                 adapter: ExecutionAdapter | None = None, max_order_usd: str = "10.00"):
+                 adapter: ExecutionAdapter | None = None, max_order_usd: str = "10.00",
+                 position_store=None):
         if mode not in {"disabled", "certification", "live"}:
             raise ValueError("execution mode must be disabled, certification, or live")
         self.store = store
         self.mode = mode
         self.adapter = adapter or DisabledExecutionAdapter()
         self.max_order = exact_decimal(max_order_usd, name="max_order_usd", scale=6, minimum=Decimal("0.01"))
+        self.position_store = position_store
 
     @property
     def live_enabled(self) -> bool:
@@ -262,11 +405,55 @@ class ExecutionCoordinator:
             "time_in_force": payload.get("time_in_force", "GTC"),
             "decision_receipt_hash": payload.get("decision_receipt_hash"),
             "event_group_id": payload["event_group_id"].strip(),
+            "buyer_id": payload.get("buyer_id"),
+            "signal_id": payload.get("signal_id"),
+            "signal_expires_at": payload.get("signal_expires_at"),
+            "exit_policy": (
+                json.dumps(payload.get("exit_policy"), sort_keys=True)
+                if payload.get("exit_policy") is not None else None
+            ),
         }
         if normalized["time_in_force"] not in {"GTC", "GTD", "FOK", "FAK"}:
             raise ExecutionError("INVALID_EXECUTION", "unsupported time_in_force")
         digest = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        return self.store.prepare(normalized, idempotency_key, digest)
+        if normalized["buyer_id"]:
+            buyer = self.store.buyer_by_id(normalized["buyer_id"])
+            if not buyer:
+                raise ExecutionError("BUYER_NOT_FOUND", "buyer was not found")
+            if buyer["kill_switch_active"]:
+                raise ExecutionError("BUYER_KILL_SWITCH", "buyer emergency stop is active")
+
+        # Position metadata — added after hash so order_direction and
+        # system-generated position_id don't change idempotency identity.
+        order_direction = payload.get("order_direction")
+        if normalized["exit_policy"] and not order_direction:
+            order_direction = "BUY"
+        normalized["order_direction"] = order_direction
+        normalized["position_id"] = payload.get("position_id")
+
+        intent, is_replay = self.store.prepare(normalized, idempotency_key, digest)
+
+        if (
+            not is_replay
+            and self.position_store is not None
+            and order_direction == "BUY"
+            and normalized["exit_policy"]
+        ):
+            from rwoo.position_monitor import ExitPolicy
+
+            position_id = f"pos_{uuid.uuid4().hex}"
+            exit_policy_data = json.loads(normalized["exit_policy"])
+            self.position_store.create(
+                position_id=position_id,
+                token_id=normalized["token_id"],
+                entry_order_id=intent["intent_id"],
+                target_quantity=normalized["quantity"],
+                policy=ExitPolicy(**exit_policy_data),
+            )
+            self.store.set_position_id(intent["intent_id"], position_id)
+            intent = self.store.get(intent["intent_id"])
+
+        return intent, is_replay
 
     def submit(self, intent_id: str, operator_approval_id: str) -> dict[str, Any]:
         intent = self.store.get(intent_id)
@@ -300,7 +487,9 @@ class ExecutionCoordinator:
                                          updates={"last_error": "venue outcome unknown; reconciliation required"})
         return self._apply_result(intent_id, {"SUBMITTING"}, result)
 
-    def submit_signed(self, intent_id: str, body_hash: str, relay) -> dict[str, Any]:
+    def submit_signed(
+        self, intent_id: str, body_hash: str, relay, operator_approval_id: str | None = None
+    ) -> dict[str, Any]:
         """Relay a caller-signed order without server-side signing authority."""
         intent = self.store.get(intent_id)
         if not intent:
@@ -309,6 +498,21 @@ class ExecutionCoordinator:
             if self.store.signed_submission_exists(body_hash):
                 raise ExecutionError("SIGNED_ORDER_REPLAY", "signed order payload was already used")
             raise ExecutionError("INVALID_EXECUTION_STATE", f"cannot submit signed order from {intent['state']}")
+        if intent.get("buyer_id"):
+            buyer = self.store.buyer_by_id(intent["buyer_id"])
+            if not buyer or buyer["kill_switch_active"]:
+                raise ExecutionError("BUYER_KILL_SWITCH", "buyer emergency stop is active")
+            if not str(operator_approval_id or "").strip():
+                raise ExecutionError("APPROVAL_REQUIRED", "explicit buyer approval is required")
+            if intent.get("signal_id"):
+                try:
+                    expires_at = datetime.fromisoformat(
+                        str(intent.get("signal_expires_at") or "").replace("Z", "+00:00")
+                    )
+                except ValueError as exc:
+                    raise ExecutionError("SIGNAL_EXPIRED", "signal expiration is invalid") from exc
+                if datetime.now(timezone.utc) >= expires_at.astimezone(timezone.utc):
+                    raise ExecutionError("SIGNAL_EXPIRED", "signal expired before signed submission")
         # Validate before burning the signature so malformed payloads can be
         # corrected by the caller without consuming the one-shot replay slot.
         self._pre_submit_validate(intent)
@@ -318,6 +522,7 @@ class ExecutionCoordinator:
             {"PREPARED"},
             "SUBMITTING",
             detail={"submission": "caller_signed", "body_hash": body_hash},
+            updates={"operator_approval_id": operator_approval_id},
         )
         try:
             result = relay(intent)
@@ -390,9 +595,41 @@ class ExecutionCoordinator:
     def _apply_result(self, intent_id: str, expected: set[str], result: VenueResult) -> dict[str, Any]:
         if result.state not in {"OPEN", "PARTIALLY_FILLED", "FILLED", "REJECTED", "CANCELLED", "EXPIRED", "UNKNOWN"}:
             raise ExecutionError("INVALID_VENUE_RESPONSE", "adapter returned an invalid state")
-        return self.store.transition(intent_id, expected, result.state, detail=asdict(result), updates={
+        intent = self.store.transition(intent_id, expected, result.state, detail=asdict(result), updates={
             "venue_order_id": result.venue_order_id,
             "filled_quantity": result.filled_quantity,
             "average_fill_price": result.average_fill_price,
             "last_error": result.message,
         })
+        self._bind_position_fill(intent, result)
+        return intent
+
+    def _bind_position_fill(self, intent: dict[str, Any], result: VenueResult) -> None:
+        """Push confirmed fills into the PositionStore if one is configured.
+
+        Called after every venue result. Only acts when there are actual fills
+        (filled_quantity > 0) and the intent is linked to a position.
+        """
+        if self.position_store is None:
+            return
+        position_id = intent.get("position_id")
+        direction = intent.get("order_direction")
+        if not position_id or not direction:
+            return
+        filled = Decimal(result.filled_quantity or "0")
+        if filled <= 0:
+            return
+        import time as _time
+
+        if direction == "BUY":
+            self.position_store.reconcile_entry(
+                position_id,
+                cumulative_filled=result.filled_quantity,
+                average_price=result.average_fill_price or "0",
+                observed_ts=int(_time.time()),
+            )
+        elif direction == "SELL":
+            self.position_store.reconcile_exit(
+                position_id,
+                cumulative_filled=result.filled_quantity,
+            )

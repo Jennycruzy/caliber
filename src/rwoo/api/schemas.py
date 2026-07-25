@@ -113,6 +113,11 @@ class SignalRequest(_StrictModel):
     limit: int = Field(default=5, ge=1, le=10)
     min_minutes_to_close: int | None = Field(default=None, ge=5, le=10080)
     cursor: str | None = Field(default=None, min_length=8, max_length=500)
+    buyer_address: str | None = Field(
+        default=None,
+        pattern="^0x[a-fA-F0-9]{40}$",
+        description="Buyer EOA used only to issue buyer-scoped execution references.",
+    )
 
     model_config = ConfigDict(
         extra="forbid",
@@ -153,6 +158,39 @@ class SubmitSignedExecutionRequest(_StrictModel):
         ...,
         description="Caller-computed Polymarket L2 headers. Never include a private key.",
     )
+    operator_approval_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ExitPolicyRequest(_StrictModel):
+    take_profit_pct: str = Field(..., pattern="^[0-9]+(?:\\.[0-9]{1,2})?$")
+    stop_loss_pct: str = Field(..., pattern="^[0-9]+(?:\\.[0-9]{1,2})?$")
+    max_hold_seconds: int = Field(..., ge=60, le=31_536_000)
+    max_exit_slippage_bps: int = Field(..., ge=1, le=5000)
+    invalidation_rule: str = Field(..., min_length=1, max_length=200)
+    partial_fill_policy: str = Field(default="protect_filled_quantity", pattern="^protect_filled_quantity$")
+
+
+class PrepareSignalExecutionRequest(_StrictModel):
+    signal_id: str = Field(..., pattern="^sig_[a-f0-9]{32}$")
+    buyer_address: str = Field(..., pattern="^0x[a-fA-F0-9]{40}$")
+    quantity: str = Field(..., min_length=1, max_length=32)
+    time_in_force: str = Field(default="GTC", pattern="^(GTC|GTD|FOK|FAK)$")
+    exit_policy: ExitPolicyRequest
+
+
+class BuyerEmergencyRequest(_StrictModel):
+    buyer_address: str = Field(..., pattern="^0x[a-fA-F0-9]{40}$")
+    action: str = Field(..., pattern="^(cancel_only|clear)$")
+    reason: str = Field(..., min_length=3, max_length=500)
+    timestamp: int = Field(..., gt=0)
+    nonce: str = Field(..., min_length=16, max_length=128)
+    signature: str = Field(..., pattern="^0x[a-fA-F0-9]{130}$")
+
+
+class SubmitSignedCancelRequest(_StrictModel):
+    body_base64: str = Field(..., min_length=1, max_length=20000)
+    headers: dict[str, str]
+    intent_ids: list[str] = Field(..., min_length=1, max_length=100)
 
 
 # ----------------------------- responses ----------------------------------

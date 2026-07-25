@@ -1,116 +1,159 @@
-# TrueOdds ASP — Buyer-Side Client Spec
+# TrueOdds ASP — Buyer Client Specification
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24. This is the current buyer-side contract.
 
-## Model: TrueOdds moves nothing
+## Boundary
 
-TrueOdds sells the signal, prepares and validates the order **intent**, and relays
-the buyer's already-signed order to Polymarket. It never holds a key, a fund, or a
-wallet session. The buyer's agent runs this client in its **own** environment,
-signs locally, and hands TrueOdds only signed bytes.
+TrueOdds sells signals, prepares and validates intents, and relays buyer-signed
+Polymarket bytes. It never holds a buyer key, fund, wallet session, L2 secret,
+signature, HMAC, or complete signed body.
 
-```
-buyer agent (own key + own funds)                 TrueOdds server
-  fund EOA  →  ensure pUSD  →  approve  →  sign  →  POST /submit-signed  →  validate + relay → CLOB
-```
-
-Nothing above the arrow into `/submit-signed` ever touches TrueOdds infrastructure.
-
-## Signer — pick either option (one interface)
-
-The client is signer-agnostic. A buyer plugs in **one** of two backends; both
-satisfy the same interface, so the rest of the client is identical.
-
-```
-Signer:
-  address() -> str                    # the execution EOA / wallet address
-  sign_order(order_eip712) -> str     # Polymarket order signature (sig-type 0)
-  sign_and_send(tx) -> tx_hash        # broadcast an on-chain tx (approve/wrap/bridge/swap)
+```text
+buyer EOA → setup_buyer_deposit_wallet() → fund deposit wallet
+    → local sign (POLY_1271) → TrueOdds submit-signed → Polymarket CLOB
 ```
 
-**Option A — raw local key.** The buyer's agent holds an EOA private key in its own
-secret store (env var / secrets manager). `eth_account` signs orders and
-transactions locally. Simplest; the key never leaves the buyer's process. This is
-what `g0_spike.py` already does with `SPIKE_PRIVATE_KEY`.
+Production orders use Polymarket signature type `3` (POLY_1271). The deposit
+wallet (derived from the buyer's EOA key) is maker/funder; the EOA key signs
+through the v2 SDK's ERC-7739 wrapping. Signature type 0 (direct EOA) is
+rejected by the Polymarket CLOB — see G4 evidence for details.
 
-**Option B — headless wallet provider.** The buyer's agent authenticates to a
-provider they control (Turnkey / Privy / Coinbase CDP) with an **API key** they
-hold — no browser. `sign_order` / `sign_and_send` become provider API calls. The
-provider keeps the key under the buyer's policy.
+## Buyer identity
 
-Both are headless, both keep the key out of TrueOdds, and both work with **bounded**
-approvals (a plain EOA, signature type 0 — no relayer, no MaxUint256 demand). The
-OKX Agentic Wallet is **not** an option here: it needs a human browser login (no
-headless auth for an agent) and it refuses the approval Polymarket requires.
+The canonical identity is the normalized EOA address. TrueOdds maps it to a
+random opaque `buyer_id` (`byr_...`) for URLs and stores all signals, intents,
+positions, and emergency state under that buyer. The final signed order's
+`POLY_ADDRESS` must equal the bound EOA.
 
-## Funding — decoupled from any single wallet
+The buyer supplies its address when requesting signals:
 
-The buyer tops up their **own EOA** however they want. Two supported top-up paths;
-the client does not care which:
+```json
+{"message":"Give me the best Polymarket signals","limit":5,
+ "buyer_address":"0x..."}
+```
 
-1. **From their OKX Agentic Wallet** — the buyer's own session, one-time login,
-   their concern. TrueOdds does not drive this hop.
-2. **Any other source** — a CEX withdrawal to Polygon, another wallet, a bridge.
+Polymarket execution candidates receive a random buyer-scoped `signal_id`.
 
-Once *any* supported stable sits in the EOA, `ensure_pusd(eoa)` reaches pUSD
-autonomously with the buyer's signer. Route selection is
-`buyer_funding.plan_pusd_funding` (pure, unit-tested):
+## Signal-to-execution lifecycle
 
-| EOA holds | Route to pUSD | Primitive |
-|---|---|---|
-| pUSD | none | — |
-| USDC.e (Polygon) | wrap → pUSD | `g0_spike._wrap_usdce_to_pusd` (recipient = EOA) |
-| X Layer USD₮0 | MESON bridge → USDC.e → wrap | G1 MESON sequence + wrap |
-| Polygon USDT / native USDC | swap → USDC.e → wrap | DEX swap + wrap |
+Signal discovery and execution are intentionally separate:
 
-The bridge leg is floored at the 2.5-token MESON minimum and grossed up for the
-fee; the post-bridge/-swap wrap consumes whatever actually lands (`CREDITED`).
+1. `GET/POST /v1/signals` returns ranked signals and `signal_id` values.
+2. The agent presents the signal and asks the buyer whether to proceed.
+3. `POST /v1/executions/prepare-signal` receives `signal_id`, buyer address,
+   quantity, and exit policy.
+4. TrueOdds verifies ownership and expiration, reruns the oracle evaluation,
+   reads the current market and CLOB book, binds the current outcome token, and
+   returns `authorization.status=AWAITING_CONFIRMATION`.
+5. The confirmation must show quantity, current limit price, maximum pUSD cost,
+   executable depth, book age, and the complete exit policy.
+6. After explicit buyer confirmation, the buyer client funds/approves as needed,
+   signs locally, and posts `submit-signed` with an approval ID.
+7. TrueOdds validates the exact signed order, burns its body hash, relays the
+   original bytes, and reconciles venue state. Submission is not a fill.
 
-> Do **not** route an EOA through `bridge.polymarket.com` — that endpoint is
-> Polymarket-facing (geoblock-sensitive) and deposits into a POLY_1271 deposit
-> wallet, not an arbitrary EOA. The EOA route is on-chain wrap, not the hosted
-> bridge.
+The signal's displayed price is informational only. The fresh book determines
+the executable limit price. Expiration is enforced during preparation and again
+before signed submission.
 
-## Lifecycle
+## Local signer interface
 
-**One-time setup (buyer-side):**
-1. Provision the EOA (raw key or provider).
-2. Fund it with any supported stable (either top-up option).
-3. `ensure_pusd(eoa)` → pUSD in the EOA.
-4. Broadcast a **one-time bounded** approval to the exchange (sig-type-0 EOA tx).
+```text
+address() -> str
+sign_order(order_eip712) -> str
+sign_and_send(tx) -> tx_hash
+```
 
-**Per buy (autonomous, no prompt):**
-1. Ask TrueOdds to prepare the intent.
-2. `ensure_pusd` tops up if the balance drifted.
-3. `sign_order` locally; `POST /submit-signed` with the signed bytes + headers.
-4. TrueOdds validates against the prepared intent and relays byte-identical to CLOB.
+`EoaOrderSubmitter` in `scripts/buyer_client.py` uses the pinned v2 SDK to:
 
-## Implementation
+- resolve the POLY_1271 deposit wallet (explicit, from prepared intent, or derived);
+- derive L2 credentials locally;
+- construct sig-type-3 BUY and SELL orders (deposit wallet = maker, EOA = signer);
+- serialize once;
+- calculate L2 headers over those exact bytes;
+- submit only the base64 body and headers to TrueOdds;
+- return an allowlisted sanitized result.
 
-- `scripts/buyer_funding.py` — `plan_pusd_funding`: pure route selection (tested).
-- `scripts/buyer_client.py` — the executor:
-  - `Signer` interface with `LocalKeySigner` (Option A, wired) and `ProviderSigner`
-    (Option B, stubbed for the buyer's provider).
-  - `ensure_pusd(signer, rpc, required_units, handlers=...)` — reads balances,
-    plans, and runs each step through the signer. The `wrap` leg is built in;
-    `bridge` (MESON) and `swap` (DEX) are injected handlers the buyer supplies,
-    each of which must block until USDC.e is credited on Polygon.
-  - Dependency-injected (signer / rpc / handlers), so orchestration is unit-tested
-    without a live key, RPC, or venue.
+The configured environment is:
 
-## Server contract (already built)
+```text
+/Users/user/trueodds/.venv-spike/bin/python
+```
 
-- `POST /v1/executions/{intent_id}/submit-signed` — accepts `body_base64 + headers`,
-  validates the order economics against the prepared intent, burns the body hash
-  for replay protection, relays the exact original bytes.
-- Buyer L2 credentials never receive the TrueOdds builder secret.
+It contains `py_clob_client_v2`.
 
-## What Codex must certify on the Mac
+## Funding and approvals
 
-1. **EOA (signature type 0) bounded approval + rest-and-cancel** — the code exists
-   (`g0_spike.py:_send_approval`, sig-type-0 handling); the live-proven run used the
-   deposit-wallet path, so a tiny EOA order accepted-and-cancelled is the missing
-   proof. Record it in `docs/evidence/`.
-2. **The X Layer USD₮0 → MESON → USDC.e → wrap** chain lands a **wrappable** USDC.e
-   balance in the EOA (not USDT, not a deposit wallet). One live confirmation.
-3. Only after (1) mark the EOA execution path shippable.
+The buyer owns all funding operations. `setup_buyer_deposit_wallet()` automates
+the entire onboarding in a single call:
+
+1. Derive deposit wallet address from buyer's key
+2. Deploy the deposit wallet if needed (via relayer)
+3. Wrap USDC.e to pUSD on the buyer EOA if needed
+4. Transfer pUSD from EOA to deposit wallet (order amount + fee buffer)
+5. Approve pUSD from deposit wallet to exchange_v2 (via relayer batch)
+6. Approve conditional tokens (setApprovalForAll) for both exchanges (via relayer)
+7. Sync the CLOB balance/allowance cache
+
+Supported funding routes to pUSD:
+
+| Asset held by buyer EOA | Route |
+|---|---|
+| pUSD | no route |
+| Polygon USDC.e | wrap to pUSD |
+| X Layer USD₮0 | MESON → Polygon USDT → USDC.e → pUSD |
+| Polygon USDT/native USDC | bounded DEX swap → USDC.e → pUSD |
+
+The 2.5-token bridge minimum applies only to the tested X Layer USD₮0 route.
+The buyer configuration `.env.buyer` references the existing secret file by
+path and variable name; it does not copy the key.
+
+## Buyer-scoped emergency control
+
+There is no global kill switch. `cancel_only` is the default and only emergency
+mode. Flattening requires a separate future action and explicit authorization.
+
+The buyer signs an EIP-191 control message containing buyer ID, action, timestamp,
+nonce, and reason. The authorization expires after five minutes and nonce reuse
+is rejected.
+
+```text
+POST /v1/buyers/{buyer_id}/emergency-stop
+GET  /v1/buyers/{buyer_id}/emergency-status
+POST /v1/buyers/{buyer_id}/emergency-clear
+POST /v1/buyers/{buyer_id}/emergency-cancel-signed
+```
+
+Emergency stop immediately cancels prepared intents and blocks new preparation
+or submission. For open venue orders, the buyer client serializes the exact
+order-ID list, creates DELETE `/orders` L2 headers locally, and sends those bytes
+to `emergency-cancel-signed`. TrueOdds relays them without obtaining credentials.
+
+## Exit policy
+
+Every signal execution must commit:
+
+```json
+{
+  "take_profit_pct":"25",
+  "stop_loss_pct":"15",
+  "max_hold_seconds":86400,
+  "max_exit_slippage_bps":150,
+  "invalidation_rule":"oracle_probability_below_entry_threshold",
+  "partial_fill_policy":"protect_filled_quantity"
+}
+```
+
+The durable position monitor prioritizes kill switch, invalidation, stop loss,
+time/close protection, and take profit. It protects confirmed partial fills,
+reserves exits idempotently, prevents overselling, and resumes safely after a
+restart. Every resulting SELL is signed by the buyer locally.
+
+## Never do
+
+- Never send a private key, seed phrase, CLOB credentials, signature, HMAC, or
+  signed body to TrueOdds or put them in logs/chat.
+- Never use signature type 0 (direct EOA); Polymarket CLOB rejects it.
+- Never use Agentic Wallet execution, hosted Polymarket bridge, or skip the
+  deposit wallet setup.
+- Never infer a fill from HTTP success; reconcile confirmed cumulative fills.

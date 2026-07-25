@@ -1,6 +1,14 @@
 # Execution Signer & Certification Runbook
 
-Last reviewed: 2026-07-23
+Last reviewed: 2026-07-24
+
+> **Current architecture notice:** This runbook contains historical research on
+> custodial/operator and POLY_1271 signer variants. It is not the production
+> execution path. Follow `RESUME_HANDOFF_2026-07-24.md`,
+> `BUYER_CLIENT_SPEC.md`, and `EXECUTION_API.md`: buyer-owned EOA, signature
+> type 0, exact approvals, buyer-scoped signal references, fresh-book prepare,
+> and buyer-signed cancellation. Do not execute any MaxUint256 or Agentic Wallet
+> procedure described in the historical sections below.
 
 This runbook covers step 2 (isolated signer) and step 3 (reconciliation,
 policy, certification) of the release train in

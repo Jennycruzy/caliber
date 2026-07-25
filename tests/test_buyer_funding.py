@@ -32,7 +32,10 @@ class BuyerFundingPlanTests(unittest.TestCase):
         plan = bf.plan_pusd_funding({"xlayer_usdt0": 5_000_000}, 100_000)
         self.assertEqual(plan[0]["action"], "bridge")
         self.assertEqual(plan[0]["amount_units"], bf.BRIDGE_MIN_UNITS)
-        self.assertEqual(plan[1], {"action": "wrap", "from_token": "usdce", "to_token": "pusd", "amount_units": bf.CREDITED})
+        self.assertEqual([step["action"] for step in plan], ["bridge", "swap", "wrap"])
+        self.assertEqual(plan[0]["to_token"], "polygon_usdt")
+        self.assertEqual(plan[1]["from_token"], "polygon_usdt")
+        self.assertEqual(plan[2], {"action": "wrap", "from_token": "usdce", "to_token": "pusd", "amount_units": bf.CREDITED})
 
     def test_xlayer_route_grosses_up_above_the_floor(self):
         # Large order: 5% fee gross-up dominates the floor.

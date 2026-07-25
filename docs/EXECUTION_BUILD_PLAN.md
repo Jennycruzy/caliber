@@ -1,4 +1,8 @@
-# Execution Build Plan — Non-Custodial Execution-Assist
+# Execution Build Plan — Non-Custodial Execution-Assist (historical)
+
+> Superseded for implementation by `RESUME_HANDOFF_2026-07-24.md`,
+> `BUYER_CLIENT_SPEC.md`, and `EXECUTION_API.md`. POLY_1271, custodial signer,
+> and MaxUint256 sections below are retained as research history only.
 
 Created: 2026-07-22
 Scope: Polymarket to completion, then Kalshi and Limitless.

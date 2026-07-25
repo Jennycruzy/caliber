@@ -16,10 +16,8 @@ Fund safety is structural, not configurational:
   floating-point values are rejected at the boundary.
 
 The HTTP data source below uses the public CLOB endpoints via an injected
-``httpx`` client. Its field mapping is PROVISIONAL and must be verified and
-pinned against the official ``Polymarket/py-sdk`` before any funded use; a
-py-sdk-backed source can implement the same :class:`PolymarketDataSource`
-protocol as a drop-in replacement.
+``httpx`` client. Field mappings are verified against captured live CLOB
+payloads and contract-tested in ``test_polymarket_live_contract.py``.
 """
 from __future__ import annotations
 
@@ -193,11 +191,13 @@ EXCHANGE_BY_MARKET_TYPE = {
 SIGNATURE_TYPES = {0: "EOA", 1: "POLY_PROXY", 2: "GNOSIS_SAFE", 3: "POLY_1271"}
 
 
-def bridge_minimum_deposit() -> dict[str, Any]:
-    """The floor a bridge route must send, in base units and human units.
+def xlayer_bridge_minimum_deposit() -> dict[str, Any]:
+    """The observed floor for the tested X Layer USDT/USD₮0 route.
 
     Published as data, not prose, so a caller agent can size its transfer
-    against it before sending rather than after the deposit stalls.
+    against it before sending rather than after the deposit stalls. This is not
+    a global Polymarket bridge minimum: normal Polygon deposit routes do not
+    publish or enforce this X Layer-specific floor.
     """
     amount = Decimal(BRIDGE_MIN_DEPOSIT_UNITS) / Decimal(10 ** COLLATERAL["decimals"])
     return {
@@ -256,7 +256,6 @@ def funding_routes() -> list[dict[str, Any]]:
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "polymarket_bridge_deposit",
-            "minimum_deposit": bridge_minimum_deposit(),
             "bridge": {
                 "base_url": POLYMARKET_BRIDGE_BASE_URL,
                 "create_deposit": "POST /deposit",
@@ -277,7 +276,6 @@ def funding_routes() -> list[dict[str, Any]]:
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "polymarket_bridge_deposit",
-            "minimum_deposit": bridge_minimum_deposit(),
             "bridge": {
                 "base_url": POLYMARKET_BRIDGE_BASE_URL,
                 "create_deposit": "POST /deposit",
@@ -299,7 +297,7 @@ def funding_routes() -> list[dict[str, Any]]:
             },
             "destination": "caller_poly_1271_deposit_wallet",
             "method": "okx_cross_chain_to_polymarket_evm_deposit_address",
-            "minimum_deposit": bridge_minimum_deposit(),
+            "minimum_deposit": xlayer_bridge_minimum_deposit(),
             "route": [
                 "POST https://bridge.polymarket.com/deposit with the caller deposit wallet",
                 "Use returned address.evm as OKX --receive-address",
@@ -453,7 +451,7 @@ def submission_package(intent: dict[str, Any], market: MarketSnapshot,
                 "takerAmount": str(taker_amount),
                 "side": VENUE_SIDE_BUY if venue_side == "BUY" else VENUE_SIDE_SELL,
                 "expiration": "0",
-                "signatureType": "3",
+                "signatureType": "0",
             },
             # Filled in locally by the caller's wallet; never supplied by us.
             "fields_supplied_by_caller": [
@@ -682,8 +680,12 @@ def _parse_book(payload: dict[str, Any]) -> OrderBook:
 class HttpPolymarketDataSource:
     """Read-only public CLOB data over an injected ``httpx`` client.
 
-    PROVISIONAL field mapping — verify and pin against the official py-sdk
-    before any funded use. Holds no credentials; issues only public GETs.
+    Field mappings verified against live CLOB payloads captured 2026-07-22 and
+    contract-tested in ``test_polymarket_live_contract.py``. Key verified
+    behaviours: ``minimum_tick_size`` (float) from /markets, ``timestamp``
+    (string epoch millis) and ``asset_id`` from /book, outcomes arrive as
+    title-case and normalize to YES/NO. Holds no credentials; issues only
+    public GETs.
     """
 
     def __init__(self, client: Any, *, base_url: str = "https://clob.polymarket.com",

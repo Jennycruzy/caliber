@@ -1,7 +1,10 @@
-# Post-ASP Handoff: Mainnet Listing Acceptance
+# Post-ASP Handoff: Mainnet Listing Acceptance (historical)
 
-Last updated: 2026-07-23 (listing-stable execution architecture; dated
-production facts below retain their original audit dates)
+Last updated: 2026-07-24. This document is retained for listing/payment
+history. For execution, follow `RESUME_HANDOFF_2026-07-24.md`,
+`BUYER_CLIENT_SPEC.md`, and `EXECUTION_API.md`. The Agentic Wallet,
+POLY_1271, JIT MaxUint256, and deposit-wallet execution language below is
+superseded and must not be resumed.
 
 The callable natural-language signal layer is deployed on `trueodd.xyz`, and
 all production services use the weather v3 model. Payments target X Layer
@@ -13,12 +16,14 @@ TEE signer. Its X Layer address is already the configured `payTo` recipient.
 That wallet session is distinct from the server-to-broker authentication used
 by the OKX seller SDK during payment verification and settlement.
 
-Important execution status as of 2026-07-23: the Polymarket caller-signed relay
-path has been live-proven with a local private-key spike, but the normal
-OKX Agentic Wallet email-session backend is not yet certified for Polymarket
-order signing. Agentic Wallet funding/bridge operations are the intended caller
-path; the remaining work is to prove CLOB L2 credential creation and POLY_1271
-order signing through that wallet session without a raw private key.
+Important execution status as of 2026-07-24: the buyer-owned EOA caller-signed
+relay path, type-0 order submitter, buyer-scoped signal references, fresh-book
+prepare flow, explicit approval boundary, durable position monitor, and
+buyer-authenticated cancel-only emergency controls are implemented and tested
+offline. General funded execution remains disabled until the live Polymarket
+data adapter and the explicitly approved minimum-size EOA BUY/SELL test are
+complete. The Agentic Wallet/POLY_1271/JIT MaxUint256 experiments below are
+historical evidence only.
 The sanitized raw-key acceptance/cancellation artifact is
 [`evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md`](evidence/G0_POLYMARKET_LIVE_RELAY_2026-07-23.md).
 
@@ -136,15 +141,16 @@ kill switch.
 - [ ] `submit-signed` relay remains non-custodial: callers send signed bytes +
       headers only; no private key, wallet export, email OTP, or CLOB secret is
       accepted by the ASP.
-- [ ] OKX Agentic Wallet backend has a live test record before being advertised
-      as executable: email login -> wallet address -> tiny funding route -> pUSD
-      credit -> POLY_1271 order signature -> `submit-signed` -> rest/cancel.
+- [ ] Buyer-owned EOA backend has a live test record before execution is
+      advertised: fresh signal -> fresh book confirmation -> exact funding and
+      approval -> type-0 BUY -> confirmed fill -> type-0 SELL -> flat balance ->
+      buyer-scoped emergency stop/cancel and restart recovery.
 
 ## Genuine next starting point
 
-When Claude returns, begin with a read-only code and deployment review. Do not
-immediately approve deployment. Verify its tests, payment implementation, live
-data binding, and security claims first. For the execution workstream, the next
-external state-changing test is an OKX Agentic Wallet login in the local
-OnchainOS session, followed by a tiny caller-owned funding/sign/rest/cancel
-test. Do not provide a private key for this path.
+When Claude returns, begin with a read-only code and deployment review. For the
+current execution workstream, use `RESUME_HANDOFF_2026-07-24.md` as the checklist:
+verify buyer-scoped `signal_id` preparation, fresh-book pricing, type-0 EOA
+signing, explicit approval, buyer-scoped cancel-only emergency control, and
+restart-safe position exits. Do not repeat funding, provide a private key, or
+resume the historical JIT MaxUint256/Agentic Wallet/POLY_1271 path.

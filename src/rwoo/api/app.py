@@ -20,6 +20,7 @@ import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from weakref import WeakValueDictionary
 
@@ -58,6 +59,9 @@ from rwoo.api.schemas import (
     PrepareExecutionRequest,
     SubmitExecutionRequest,
     SubmitSignedExecutionRequest,
+    PrepareSignalExecutionRequest,
+    BuyerEmergencyRequest,
+    SubmitSignedCancelRequest,
     ExecutionResponse,
 )
 from rwoo.api import services
@@ -70,10 +74,12 @@ from rwoo.expansion_coverage import (
 )
 from rwoo.scanner import ECONOMICS_SERIES, SPORTS_SERIES, WEATHER_SERIES, evaluate_market
 from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
-from rwoo.execution import ExecutionCoordinator, ExecutionError, ExecutionStore
+from rwoo.execution import ExecutionCoordinator, ExecutionError, ExecutionStore, canonical
 from rwoo.adapters.polymarket import COLLATERAL, funding_routes
 from rwoo.signed_relay import (
+    decode_signed_cancel,
     decode_signed_order,
+    relay_signed_cancel,
     relay_signed_order,
     validate_signed_order_matches_intent,
 )
@@ -89,6 +95,7 @@ _IDEMPOTENT_ROUTES = {
     ("POST", "/v1/check-market"),
     ("POST", "/v1/cross-venue-edge"),
     ("POST", "/v1/executions/prepare"),
+    ("POST", "/v1/executions/prepare-signal"),
     ("POST", "/v1/executions/{intent_id}/submit-signed"),
 }
 
@@ -103,6 +110,46 @@ _SECURITY_HEADERS = {
 def _request_id(request: Request) -> str:
     rid = getattr(request.state, "request_id", None)
     return rid or request.headers.get(REQUEST_ID_HEADER) or f"req_{uuid.uuid4().hex}"
+
+
+def _buyer_control_message(
+    buyer_id: str, action: str, timestamp: int, nonce: str, reason: str
+) -> str:
+    return "\n".join((
+        "TrueOdds ASP buyer control v1",
+        f"buyer_id:{buyer_id}",
+        f"action:{action}",
+        f"timestamp:{timestamp}",
+        f"nonce:{nonce}",
+        f"reason:{reason}",
+    ))
+
+
+def _verify_buyer_control(store: ExecutionStore, buyer_id: str, body: BuyerEmergencyRequest) -> dict[str, Any]:
+    buyer = store.buyer_by_id(buyer_id)
+    if not buyer or buyer["address"] != body.buyer_address.lower():
+        raise OracleError("BUYER_NOT_FOUND", "buyer reference does not match this EOA")
+    if abs(int(datetime.now(timezone.utc).timestamp()) - body.timestamp) > 300:
+        raise OracleError("CONTROL_AUTH_EXPIRED", "buyer control authorization is outside the five-minute window")
+    try:
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        recovered = Account.recover_message(
+            encode_defunct(text=_buyer_control_message(
+                buyer_id, body.action, body.timestamp, body.nonce, body.reason
+            )),
+            signature=body.signature,
+        )
+    except Exception as exc:
+        raise OracleError("INVALID_BUYER_SIGNATURE", "buyer control signature is invalid") from exc
+    if recovered.lower() != buyer["address"]:
+        raise OracleError("INVALID_BUYER_SIGNATURE", "buyer control signature does not match the buyer EOA")
+    try:
+        store.consume_control_nonce(buyer_id, body.nonce)
+    except ExecutionError as exc:
+        raise OracleError(exc.code, str(exc)) from exc
+    return buyer
 
 
 _SERVICE_DESCRIPTION = {
@@ -126,24 +173,6 @@ def _execution_client_package(intent: dict[str, Any], settings: Settings) -> dic
         },
         "wallet_backends": [
             {
-                "id": "okx_agentic_wallet",
-                "status": "funding_ready_order_signing_adapter_pending",
-                "auth": "email_or_api_key_session",
-                "requires_private_key_env": False,
-                "capabilities": [
-                    "evm_address",
-                    "evm_contract_call",
-                    "evm_token_transfer",
-                    "cross_chain_execute",
-                    "eip712_sign_message",
-                ],
-                "note": (
-                    "normal ASP agents can use an authenticated OKX Agentic Wallet "
-                    "session for funding; Polymarket POLY_1271 order signing still "
-                    "needs a verified Agentic Wallet signer adapter"
-                ),
-            },
-            {
                 "id": "local_private_key",
                 "status": "executable",
                 "auth": "local_env_private_key",
@@ -153,9 +182,10 @@ def _execution_client_package(intent: dict[str, Any], settings: Settings) -> dic
                     "evm_contract_call",
                     "evm_token_transfer",
                     "polymarket_l2_headers",
-                    "poly_1271_order_sign",
+                    "eoa_signature_type_0_order_sign",
+                    "buyer_scoped_emergency_control",
                 ],
-                "note": "developer fallback used by the live spike and offline tests",
+                "note": "production buyer-owned EOA; signing authority stays in the buyer process",
             },
         ],
         "funding_routes": funding_routes(),
@@ -165,15 +195,7 @@ def _execution_client_package(intent: dict[str, Any], settings: Settings) -> dic
             "body": {"body_base64": "<exact Polymarket /order bytes>", "headers": "<caller L2 headers>"},
         },
         "helper": {
-            "package": "scripts/polymarket_agent_helper.py",
-            "one_flow_local_key": (
-                "python scripts/polymarket_agent_helper.py --intent-file <prepared.json> "
-                f"--asp-url {base_url} --wallet-backend local-private-key --execute"
-            ),
-            "funding_plan_agentic_wallet": (
-                "python scripts/polymarket_agent_helper.py --intent-file <prepared.json> "
-                "--wallet-backend okx-agentic-wallet --funding-plan --source-asset xlayer-usdt"
-            ),
+            "package": "scripts/buyer_client.py",
             "local_secret_boundary": "private key material, if any exists, stays inside the caller-side wallet backend",
         },
     }
@@ -860,6 +882,33 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             "sequence": committed.sequence,
             "verification_url": settings.verification_url(committed.record_hash),
         }
+        if body.buyer_address:
+            buyer = request.app.state.execution.store.buyer(body.buyer_address)
+            for signal in result["signals"]:
+                if signal.get("venue") != "polymarket" or not signal.get("execution_recommended"):
+                    continue
+                reference = request.app.state.execution.store.create_signal_ref(
+                    buyer["buyer_id"],
+                    {
+                        "signal_receipt_hash": committed.record_hash,
+                        "rank": signal["rank"],
+                        "venue": signal["venue"],
+                        "market_id": signal["market_id"],
+                        "side": signal["side"],
+                        "event_group_id": signal.get("event_group_id"),
+                        "quoted_entry_price": signal.get("entry_price"),
+                    },
+                    signal["signal_expires_at"],
+                )
+                signal["signal_id"] = reference["signal_id"]
+                signal["execution"] = {
+                    "available": True,
+                    "requires_confirmation": True,
+                    "buyer_id": buyer["buyer_id"],
+                    "prepare_url": f"{settings.api_base_url.rstrip('/')}/v1/executions/prepare-signal",
+                    "expires_at": reference["expires_at"],
+                    "quote_is_informational": True,
+                }
         return result
 
     @app.post(
@@ -891,9 +940,12 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         limit: int = Query(default=5, ge=1, le=10),
         min_minutes_to_close: int | None = Query(default=None, ge=5, le=10080),
         cursor: str | None = Query(default=None, min_length=8, max_length=500),
+        buyer_address: str | None = Query(
+            default=None, pattern="^0x[a-fA-F0-9]{40}$"
+        ),
     ):
         body = SignalRequest(message=message, limit=limit, min_minutes_to_close=min_minutes_to_close,
-                             cursor=cursor)
+                             cursor=cursor, buyer_address=buyer_address)
         return await _best_signals(request, body)
 
     # Compatibility for agent clients that POST their text envelope to the
@@ -1011,6 +1063,109 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         return _enrich_execution(intent, settings)
 
     @app.post(
+        "/v1/executions/prepare-signal", response_model=ExecutionResponse, tags=["execution"],
+        summary="Prepare a buyer-selected signal against a fresh executable CLOB book",
+        responses={409: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
+    )
+    async def prepare_signal_execution(request: Request, body: PrepareSignalExecutionRequest):
+        key = request.headers.get(IDEMPOTENCY_HEADER)
+        if not key:
+            raise OracleError("INVALID_EXECUTION", "Idempotency-Key is required for execution preparation")
+        store = request.app.state.execution.store
+        buyer = store.buyer(body.buyer_address)
+        reference = store.signal_ref(body.signal_id, buyer["buyer_id"])
+        if not reference:
+            raise OracleError("SIGNAL_NOT_FOUND", "signal reference was not found for this buyer")
+        try:
+            expires_at = datetime.fromisoformat(reference["expires_at"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise OracleError("SIGNAL_EXPIRED", "signal reference has an invalid expiration") from exc
+        if datetime.now(timezone.utc) >= expires_at.astimezone(timezone.utc):
+            raise OracleError("SIGNAL_EXPIRED", "signal reference has expired; request fresh signals")
+
+        candidate = reference["payload"]
+        try:
+            take_profit = Decimal(body.exit_policy.take_profit_pct)
+            stop_loss = Decimal(body.exit_policy.stop_loss_pct)
+        except InvalidOperation as exc:
+            raise OracleError("INVALID_EXECUTION", "exit percentages are invalid") from exc
+        if take_profit <= 0 or take_profit > 1000 or stop_loss <= 0 or stop_loss >= 100:
+            raise OracleError(
+                "INVALID_EXECUTION",
+                "take profit must be in (0,1000] and stop loss in (0,100)",
+            )
+        adapter = request.app.state.execution.adapter
+        data_source = getattr(adapter, "data_source", None)
+        if data_source is None:
+            raise OracleError(
+                "LIVE_BOOK_UNAVAILABLE",
+                "signal execution preparation requires the configured live Polymarket book adapter",
+            )
+        try:
+            canonical_market = request.app.state.fetch_market(
+                candidate["venue"], candidate["market_id"]
+            )
+            fresh_record = request.app.state.evaluate(canonical_market)
+            if (
+                fresh_record is None
+                or not fresh_record.actionable
+                or fresh_record.side != candidate["side"]
+            ):
+                raise ExecutionError(
+                    "SIGNAL_NO_LONGER_ACTIONABLE",
+                    "the selected signal no longer passes the oracle execution gates",
+                )
+            live_market = data_source.market(candidate["market_id"])
+            token_id = live_market.tokens.get(candidate["side"])
+            if not token_id:
+                raise ExecutionError("MARKET_BINDING_MISMATCH", "live market has no token for the signal outcome")
+            live_book = data_source.book(token_id)
+            best_ask = live_book.best_ask
+            if best_ask is None:
+                raise ExecutionError("EMPTY_BOOK", "live order book has no ask")
+            price = canonical(best_ask)
+            payload = {
+                "venue": "polymarket",
+                "market_id": candidate["market_id"],
+                "token_id": token_id,
+                "side": candidate["side"],
+                "price": price,
+                "quantity": body.quantity,
+                "time_in_force": body.time_in_force,
+                "event_group_id": fresh_record.event_group_id,
+                "decision_receipt_hash": candidate["signal_receipt_hash"],
+                "buyer_id": buyer["buyer_id"],
+                "signal_id": body.signal_id,
+                "signal_expires_at": reference["expires_at"],
+                "exit_policy": body.exit_policy.model_dump(),
+            }
+            assessment = adapter.validate(payload)
+            quantity = Decimal(body.quantity)
+            maximum_cost = canonical(best_ask * quantity)
+        except ExecutionError as exc:
+            raise OracleError(exc.code, str(exc)) from exc
+        except (InvalidOperation, ValueError) as exc:
+            raise OracleError("INVALID_EXECUTION", "quantity is not a valid decimal") from exc
+        intent, _ = _execution_call(lambda: request.app.state.execution.prepare(payload, key))
+        enriched = _enrich_execution(intent, settings)
+        enriched["authorization"] = {
+            "status": "AWAITING_CONFIRMATION",
+            "signal_id": body.signal_id,
+            "buyer_id": buyer["buyer_id"],
+            "quantity": body.quantity,
+            "limit_price": price,
+            "maximum_cost_pusd": maximum_cost,
+            "exit_policy": body.exit_policy.model_dump(),
+            "fresh_book": {
+                "best_bid": assessment.best_bid,
+                "best_ask": assessment.best_ask,
+                "marketable_depth": assessment.marketable_depth,
+                "book_age_seconds": assessment.book_age_seconds,
+            },
+        }
+        return enriched
+
+    @app.post(
         "/v1/executions/{intent_id}/submit", response_model=ExecutionResponse, tags=["execution"],
         summary="Submit a prepared intent when the funded execution interlock is unlocked",
         responses={403: {"model": ErrorEnvelope}, 423: {"model": ErrorEnvelope}},
@@ -1031,11 +1186,20 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         intent = request.app.state.execution.store.get(intent_id)
         if intent is None:
             raise OracleError("EXECUTION_NOT_FOUND", "execution intent was not found")
+        if intent.get("buyer_id"):
+            buyer = request.app.state.execution.store.buyer_by_id(intent["buyer_id"])
+            poly_address = payload.headers.get("POLY_ADDRESS", "").lower()
+            if not buyer or poly_address != buyer["address"]:
+                raise OracleError(
+                    "BUYER_MISMATCH",
+                    "signed order authentication address does not match the prepared buyer",
+                )
         _execution_call(lambda: validate_signed_order_matches_intent(intent, payload))
         intent = _execution_call(lambda: request.app.state.execution.submit_signed(
             intent_id,
             payload.body_hash,
             lambda _intent: relay_signed_order(payload),
+            body.operator_approval_id,
         ))
         return _enrich_execution(intent, settings)
 
@@ -1064,6 +1228,149 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
     async def reconcile_execution(intent_id: str, request: Request):
         intent = _execution_call(lambda: request.app.state.execution.reconcile(intent_id))
         return _enrich_execution(intent, settings)
+
+    @app.post(
+        "/v1/buyers/{buyer_id}/emergency-stop", tags=["execution"],
+        summary="Activate a buyer-scoped cancel-only emergency stop",
+    )
+    async def buyer_emergency_stop(
+        buyer_id: str, request: Request, body: BuyerEmergencyRequest
+    ):
+        if body.action != "cancel_only":
+            raise OracleError("INVALID_CONTROL_ACTION", "emergency-stop requires action cancel_only")
+        store = request.app.state.execution.store
+        _verify_buyer_control(store, buyer_id, body)
+        buyer = _execution_call(lambda: store.set_kill_switch(
+            buyer_id, active=True, reason=body.reason
+        ))
+        cancelled, buyer_cancel_required = [], []
+        for intent in store.buyer_intents(buyer_id):
+            if intent["state"] == "PREPARED":
+                result = _execution_call(lambda intent_id=intent["intent_id"]:
+                                         request.app.state.execution.cancel(intent_id))
+                cancelled.append(result["intent_id"])
+            elif intent["state"] in {"OPEN", "PARTIALLY_FILLED", "CANCELLING", "UNKNOWN"}:
+                # TrueOdds has no buyer L2 cancellation credential. These IDs
+                # are returned to the buyer client for authenticated venue
+                # cancellation; the kill switch already blocks new submission.
+                buyer_cancel_required.append(intent["intent_id"])
+        return {
+            "buyer_id": buyer_id,
+            "active": bool(buyer["kill_switch_active"]),
+            "mode": "cancel_only",
+            "cancelled_prepared_intents": cancelled,
+            "buyer_cancel_required": buyer_cancel_required,
+            "flattened": False,
+            "reason": buyer["kill_switch_reason"],
+            "updated_at": buyer["kill_switch_updated_at"],
+        }
+
+    @app.post(
+        "/v1/buyers/{buyer_id}/emergency-cancel-signed", tags=["execution"],
+        summary="Relay buyer-authenticated cancellation bytes for emergency open orders",
+    )
+    async def buyer_emergency_cancel_signed(
+        buyer_id: str, request: Request, body: SubmitSignedCancelRequest
+    ):
+        store = request.app.state.execution.store
+        buyer = store.buyer_by_id(buyer_id)
+        if not buyer:
+            raise OracleError("BUYER_NOT_FOUND", "buyer was not found")
+        if not buyer["kill_switch_active"]:
+            raise OracleError("INVALID_EXECUTION_STATE", "buyer emergency stop is not active")
+        payload = _execution_call(lambda: decode_signed_cancel(body.body_base64, body.headers))
+        if payload.headers["POLY_ADDRESS"].lower() != buyer["address"]:
+            raise OracleError("BUYER_MISMATCH", "cancellation address does not match the buyer EOA")
+        if len(set(body.intent_ids)) != len(body.intent_ids):
+            raise OracleError("INVALID_EXECUTION", "intent_ids must be unique")
+        intents = []
+        for intent_id in body.intent_ids:
+            intent = store.get(intent_id)
+            if (
+                not intent
+                or intent.get("buyer_id") != buyer_id
+                or intent["state"] not in {"OPEN", "PARTIALLY_FILLED", "CANCELLING", "UNKNOWN"}
+                or not intent.get("venue_order_id")
+            ):
+                raise OracleError(
+                    "INVALID_EXECUTION_STATE",
+                    "every cancellation intent must be an open buyer-owned venue order",
+                )
+            intents.append(intent)
+        expected_order_ids = [intent["venue_order_id"] for intent in intents]
+        if payload.order_ids != expected_order_ids:
+            raise OracleError(
+                "BUYER_MISMATCH",
+                "signed cancellation order IDs do not exactly match the requested intents",
+            )
+        _execution_call(lambda: store.reserve_signed_cancel(buyer_id, payload.body_hash))
+        try:
+            venue_response = relay_signed_cancel(payload)
+        except ExecutionError as exc:
+            raise OracleError(exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise OracleError(
+                "VENUE_RELAY_FAILED",
+                "cancellation outcome is unknown; reconcile before retrying",
+            ) from exc
+        cancelled_at_venue = set(venue_response.get("canceled") or [])
+        cancelled_intents = []
+        for intent in intents:
+            if intent["venue_order_id"] not in cancelled_at_venue:
+                continue
+            updated = _execution_call(lambda intent=intent: store.transition(
+                intent["intent_id"], {intent["state"]}, "CANCELLED",
+                detail={"reason": "buyer-signed emergency cancellation"},
+            ))
+            cancelled_intents.append(updated["intent_id"])
+        return {
+            "buyer_id": buyer_id,
+            "mode": "cancel_only",
+            "cancelled_intents": cancelled_intents,
+            "remaining_intents": [
+                intent["intent_id"] for intent in intents
+                if intent["intent_id"] not in cancelled_intents
+            ],
+            "body_sha256": payload.body_hash,
+        }
+
+    @app.get(
+        "/v1/buyers/{buyer_id}/emergency-status", tags=["execution"],
+        summary="Inspect a buyer-scoped emergency stop",
+    )
+    async def buyer_emergency_status(buyer_id: str, request: Request):
+        buyer = request.app.state.execution.store.buyer_by_id(buyer_id)
+        if not buyer:
+            raise OracleError("BUYER_NOT_FOUND", "buyer was not found")
+        return {
+            "buyer_id": buyer_id,
+            "active": bool(buyer["kill_switch_active"]),
+            "mode": "cancel_only",
+            "reason": buyer["kill_switch_reason"],
+            "updated_at": buyer["kill_switch_updated_at"],
+        }
+
+    @app.post(
+        "/v1/buyers/{buyer_id}/emergency-clear", tags=["execution"],
+        summary="Clear a buyer-scoped emergency stop with fresh EOA authorization",
+    )
+    async def buyer_emergency_clear(
+        buyer_id: str, request: Request, body: BuyerEmergencyRequest
+    ):
+        if body.action != "clear":
+            raise OracleError("INVALID_CONTROL_ACTION", "emergency-clear requires action clear")
+        store = request.app.state.execution.store
+        _verify_buyer_control(store, buyer_id, body)
+        buyer = _execution_call(lambda: store.set_kill_switch(
+            buyer_id, active=False, reason=body.reason
+        ))
+        return {
+            "buyer_id": buyer_id,
+            "active": bool(buyer["kill_switch_active"]),
+            "mode": "cancel_only",
+            "reason": buyer["kill_switch_reason"],
+            "updated_at": buyer["kill_switch_updated_at"],
+        }
 
     @app.get(
         "/v1/calibration", response_model=CalibrationResponse,

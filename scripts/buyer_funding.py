@@ -15,7 +15,7 @@ selection is unit-testable without a live RPC, key, or venue.
 Supported EOA routes to pUSD:
   - pUSD already present            -> no-op
   - USDC.e on Polygon              -> wrap -> pUSD
-  - X Layer USD₮0                  -> MESON bridge -> USDC.e -> wrap -> pUSD
+  - X Layer USD₮0                  -> MESON -> Polygon USDT -> USDC.e -> pUSD
   - Polygon USDT / native USDC     -> swap -> USDC.e -> wrap -> pUSD
 """
 from __future__ import annotations
@@ -53,7 +53,7 @@ def _wrap(amount) -> dict:
 
 
 def _bridge(src: str, amount: int) -> dict:
-    return {"action": "bridge", "from_token": src, "to_token": "usdce", "amount_units": amount}
+    return {"action": "bridge", "from_token": src, "to_token": "polygon_usdt", "amount_units": amount}
 
 
 def _swap(src: str, amount: int) -> dict:
@@ -94,7 +94,11 @@ def plan_pusd_funding(
     # honor the route floor; wrap whatever actually lands.
     bridge_in = max(shortfall + _ceil_bps(shortfall, bridge_fee_bps), bridge_min_units)
     if balances.get("xlayer_usdt0", 0) >= bridge_in:
-        return [_bridge("xlayer_usdt0", bridge_in), _wrap(CREDITED)]
+        return [
+            _bridge("xlayer_usdt0", bridge_in),
+            _swap("polygon_usdt", CREDITED),
+            _wrap(CREDITED),
+        ]
 
     # Polygon USDT / native USDC need a same-chain swap to USDC.e first.
     for src in ("polygon_usdt", "native_usdc"):

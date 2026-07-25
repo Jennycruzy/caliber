@@ -13,7 +13,9 @@ import base64
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rwoo.api.app import create_app
@@ -323,7 +325,7 @@ class ExecutionApiTests(unittest.TestCase):
                 "takerAmount": "2500000",
                 "side": "BUY",
                 "expiration": "0",
-                "signatureType": 3,
+                "signatureType": 0,
                 "timestamp": "1770000000000",
                 "metadata": "0x" + "0" * 64,
                 "builder": "0x" + "0" * 64,
@@ -405,6 +407,303 @@ class ExecutionApiTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["error"]["code"], "SIGNED_ORDER_REPLAY")
+
+    def test_buyer_signal_reference_prepares_from_fresh_book(self):
+        class DataSource:
+            def market(self, _market_id):
+                return SimpleNamespace(tokens={"YES": "token-yes"})
+
+            def book(self, _token_id):
+                return SimpleNamespace(best_ask=Decimal("0.045"))
+
+        class Adapter:
+            data_source = DataSource()
+
+            def validate(self, _intent):
+                return SimpleNamespace(
+                    best_bid="0.044", best_ask="0.045", marketable_depth="9",
+                    book_age_seconds=0.2,
+                )
+
+        client, _ = client_for(
+            self.tmp,
+            fetch=lambda _v, _m: a_market("polymarket", "market-1"),
+            evaluate=lambda market: priced_record(market),
+            settings=make_settings(self.tmp, execution_mode="certification"),
+        )
+        client.app.state.execution.adapter = Adapter()
+        ranked = {
+            "answer": "Found one.",
+            "signals": [{
+                "rank": 1, "venue": "polymarket", "market_id": "market-1",
+                "family": "weather.temperature", "side": "YES",
+                "event_group_id": "weather.temperature:abc123",
+                "entry_price": "0.04", "execution_recommended": True,
+                "signal_expires_at": "2099-01-01T00:00:00+00:00",
+            }],
+            "filters": {}, "pagination": {}, "evidence_notice": "test",
+        }
+        address = "0x" + "11" * 20
+        with patch("rwoo.api.app.rank_signals", return_value=ranked):
+            signals = client.post(
+                "/v1/signals",
+                json={"message": "best signals", "buyer_address": address},
+            )
+        self.assertEqual(signals.status_code, 200)
+        signal = signals.json()["signals"][0]
+        self.assertTrue(signal["signal_id"].startswith("sig_"))
+        self.assertTrue(signal["execution"]["quote_is_informational"])
+
+        prepared = client.post(
+            "/v1/executions/prepare-signal",
+            headers={"Idempotency-Key": "signal-execution-1"},
+            json={
+                "signal_id": signal["signal_id"],
+                "buyer_address": address,
+                "quantity": "5",
+                "exit_policy": {
+                    "take_profit_pct": "25",
+                    "stop_loss_pct": "15",
+                    "max_hold_seconds": 86400,
+                    "max_exit_slippage_bps": 150,
+                    "invalidation_rule": "oracle_probability_below_entry_threshold",
+                    "partial_fill_policy": "protect_filled_quantity",
+                },
+            },
+        )
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        authorization = prepared.json()["authorization"]
+        self.assertEqual(authorization["limit_price"], "0.045")
+        self.assertEqual(authorization["maximum_cost_pusd"], "0.225")
+        self.assertEqual(authorization["status"], "AWAITING_CONFIRMATION")
+
+    def test_prepare_signal_returns_full_book_depth_age_and_exit_policy(self):
+        """Handoff step 3: verify prepare-signal returns max pUSD cost, live
+        price, depth, book age, and exit policy from a frozen offline book."""
+        class DataSource:
+            def market(self, _market_id):
+                return SimpleNamespace(tokens={"YES": "token-yes"})
+
+            def book(self, _token_id):
+                return SimpleNamespace(best_ask=Decimal("0.045"))
+
+        class Adapter:
+            data_source = DataSource()
+
+            def validate(self, _intent):
+                return SimpleNamespace(
+                    best_bid="0.044", best_ask="0.045",
+                    marketable_depth="230", book_age_seconds=1.7,
+                )
+
+        client, _ = client_for(
+            self.tmp,
+            fetch=lambda _v, _m: a_market("polymarket", "market-1"),
+            evaluate=lambda market: priced_record(market),
+            settings=make_settings(self.tmp, execution_mode="certification"),
+        )
+        client.app.state.execution.adapter = Adapter()
+        ranked = {
+            "answer": "Found one.",
+            "signals": [{
+                "rank": 1, "venue": "polymarket", "market_id": "market-1",
+                "family": "weather.temperature", "side": "YES",
+                "event_group_id": "weather.temperature:abc123",
+                "entry_price": "0.04", "execution_recommended": True,
+                "signal_expires_at": "2099-01-01T00:00:00+00:00",
+            }],
+            "filters": {}, "pagination": {}, "evidence_notice": "test",
+        }
+        address = "0x" + "33" * 20
+        exit_policy = {
+            "take_profit_pct": "25",
+            "stop_loss_pct": "15",
+            "max_hold_seconds": 86400,
+            "max_exit_slippage_bps": 150,
+            "invalidation_rule": "oracle_probability_below_entry_threshold",
+            "partial_fill_policy": "protect_filled_quantity",
+        }
+        with patch("rwoo.api.app.rank_signals", return_value=ranked):
+            signals = client.post(
+                "/v1/signals",
+                json={"message": "best signals", "buyer_address": address},
+            )
+        signal = signals.json()["signals"][0]
+
+        prepared = client.post(
+            "/v1/executions/prepare-signal",
+            headers={"Idempotency-Key": "signal-full-check-1"},
+            json={
+                "signal_id": signal["signal_id"],
+                "buyer_address": address,
+                "quantity": "10",
+                "exit_policy": exit_policy,
+            },
+        )
+        self.assertEqual(prepared.status_code, 200, prepared.text)
+        auth = prepared.json()["authorization"]
+
+        # Status and identity
+        self.assertEqual(auth["status"], "AWAITING_CONFIRMATION")
+        self.assertEqual(auth["signal_id"], signal["signal_id"])
+        self.assertTrue(auth["buyer_id"].startswith("byr_"))
+        self.assertEqual(auth["quantity"], "10")
+
+        # Max pUSD cost = best_ask * quantity = 0.045 * 10 = 0.45
+        self.assertEqual(auth["limit_price"], "0.045")
+        self.assertEqual(auth["maximum_cost_pusd"], "0.45")
+
+        # Fresh book snapshot
+        book = auth["fresh_book"]
+        self.assertEqual(book["best_bid"], "0.044")
+        self.assertEqual(book["best_ask"], "0.045")
+        self.assertEqual(book["marketable_depth"], "230")
+        self.assertEqual(book["book_age_seconds"], 1.7)
+
+        # Exit policy echoed back exactly
+        self.assertEqual(auth["exit_policy"]["take_profit_pct"], "25")
+        self.assertEqual(auth["exit_policy"]["stop_loss_pct"], "15")
+        self.assertEqual(auth["exit_policy"]["max_hold_seconds"], 86400)
+        self.assertEqual(auth["exit_policy"]["max_exit_slippage_bps"], 150)
+
+        # The intent is PREPARED and has the submit-signed URL
+        intent = prepared.json()
+        self.assertEqual(intent["state"], "PREPARED")
+        self.assertIn("submit_signed", str(intent.get("client_execution", "")))
+
+    def test_prepare_signal_rejects_expired_signal(self):
+        """Expired signals must be caught before any book read."""
+        class DataSource:
+            def market(self, _market_id):
+                return SimpleNamespace(tokens={"YES": "token-yes"})
+
+            def book(self, _token_id):
+                return SimpleNamespace(best_ask=Decimal("0.045"))
+
+        class Adapter:
+            data_source = DataSource()
+
+            def validate(self, _intent):
+                return SimpleNamespace(
+                    best_bid="0.044", best_ask="0.045",
+                    marketable_depth="9", book_age_seconds=0.2,
+                )
+
+        client, _ = client_for(
+            self.tmp,
+            fetch=lambda _v, _m: a_market("polymarket", "market-1"),
+            evaluate=lambda market: priced_record(market),
+            settings=make_settings(self.tmp, execution_mode="certification"),
+        )
+        client.app.state.execution.adapter = Adapter()
+        ranked = {
+            "answer": "Found one.",
+            "signals": [{
+                "rank": 1, "venue": "polymarket", "market_id": "market-1",
+                "family": "weather.temperature", "side": "YES",
+                "event_group_id": "weather.temperature:abc123",
+                "entry_price": "0.04", "execution_recommended": True,
+                "signal_expires_at": "2020-01-01T00:00:00+00:00",
+            }],
+            "filters": {}, "pagination": {}, "evidence_notice": "test",
+        }
+        address = "0x" + "44" * 20
+        with patch("rwoo.api.app.rank_signals", return_value=ranked):
+            signals = client.post(
+                "/v1/signals",
+                json={"message": "best signals", "buyer_address": address},
+            )
+        signal = signals.json()["signals"][0]
+
+        prepared = client.post(
+            "/v1/executions/prepare-signal",
+            headers={"Idempotency-Key": "expired-signal-1"},
+            json={
+                "signal_id": signal["signal_id"],
+                "buyer_address": address,
+                "quantity": "5",
+                "exit_policy": {
+                    "take_profit_pct": "25", "stop_loss_pct": "15",
+                    "max_hold_seconds": 86400, "max_exit_slippage_bps": 150,
+                    "invalidation_rule": "oracle_invalidated",
+                },
+            },
+        )
+        self.assertEqual(prepared.status_code, 410)
+        self.assertIn("expired", prepared.json()["error"]["message"].lower())
+
+    def test_emergency_stop_is_eoa_signed_buyer_scoped_and_replay_safe(self):
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        from rwoo.api.app import _buyer_control_message
+
+        client, _ = client_for(self.tmp)
+        account = Account.create()
+        buyer = client.app.state.execution.store.buyer(account.address)
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        nonce = "nonce-1234567890"
+        reason = "operator requested emergency cancellation"
+        message = _buyer_control_message(
+            buyer["buyer_id"], "cancel_only", timestamp, nonce, reason
+        )
+        signature = account.sign_message(encode_defunct(text=message)).signature.hex()
+        payload = {
+            "buyer_address": account.address,
+            "action": "cancel_only",
+            "reason": reason,
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "signature": signature if signature.startswith("0x") else f"0x{signature}",
+        }
+        first = client.post(
+            f"/v1/buyers/{buyer['buyer_id']}/emergency-stop", json=payload
+        )
+        second = client.post(
+            f"/v1/buyers/{buyer['buyer_id']}/emergency-stop", json=payload
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertTrue(first.json()["active"])
+        self.assertEqual(first.json()["mode"], "cancel_only")
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["error"]["code"], "CONTROL_REPLAY")
+
+    def test_emergency_cancel_relays_exact_buyer_signed_order_ids(self):
+        client, _ = client_for(self.tmp)
+        store = client.app.state.execution.store
+        address = "0x" + "11" * 20
+        buyer = store.buyer(address)
+        payload = self.payload()
+        payload.update({
+            "decision_receipt_hash": "receipt",
+            "buyer_id": buyer["buyer_id"],
+        })
+        intent, _ = client.app.state.execution.prepare(payload, "emergency-open")
+        store.transition(intent["intent_id"], {"PREPARED"}, "SUBMITTING")
+        intent = store.transition(
+            intent["intent_id"], {"SUBMITTING"}, "OPEN",
+            updates={"venue_order_id": "venue-order-1"},
+        )
+        store.set_kill_switch(
+            buyer["buyer_id"], active=True, reason="emergency"
+        )
+        raw = json.dumps(["venue-order-1"], separators=(",", ":")).encode()
+        headers = self.signed_headers()
+        headers["POLY_ADDRESS"] = address
+        with patch(
+            "rwoo.api.app.relay_signed_cancel",
+            return_value={"canceled": ["venue-order-1"], "not_canceled": {}},
+        ):
+            response = client.post(
+                f"/v1/buyers/{buyer['buyer_id']}/emergency-cancel-signed",
+                json={
+                    "body_base64": base64.b64encode(raw).decode(),
+                    "headers": headers,
+                    "intent_ids": [intent["intent_id"]],
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["cancelled_intents"], [intent["intent_id"]])
+        self.assertEqual(store.get(intent["intent_id"])["state"], "CANCELLED")
 
 
 class CrossVenueTests(unittest.TestCase):

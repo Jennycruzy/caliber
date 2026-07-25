@@ -182,26 +182,21 @@ class SettlementRequirementsTests(unittest.TestCase):
         self.assertEqual(routes["xlayer-usdt-okx-to-polymarket-bridge"]["destination"],
                          "caller_poly_1271_deposit_wallet")
 
-    def test_every_bridge_route_publishes_the_minimum_deposit(self):
-        # A caller sizing from the order notional alone underfunds any order
-        # below the floor, and the bridge credits nothing and reports nothing.
-        # The floor has to reach the caller as data on every bridge route.
+    def test_only_xlayer_route_publishes_the_observed_minimum_deposit(self):
+        # The silent 2.5-token floor was observed on the tested X Layer route.
+        # It must reach callers as data there, but must not be generalized to
+        # normal Polygon deposits where no corresponding minimum was observed.
         req = self.build(self.market)
         routes = {route["id"]: route for route in req["funding_routes"]}
-        bridge_ids = [
-            "polygon-usdc-bridge",
-            "polygon-usdt-bridge",
-            "xlayer-usdt-okx-to-polymarket-bridge",
-        ]
-        for route_id in bridge_ids:
-            with self.subTest(route=route_id):
-                minimum = routes[route_id]["minimum_deposit"]
-                self.assertEqual(minimum["base_units"], "2500000")
-                self.assertEqual(minimum["amount"], "2.5")
-                self.assertEqual(minimum["decimals"], 6)
-        # Non-bridge routes do not go near the bridge and must not claim a floor.
+        minimum = routes["xlayer-usdt-okx-to-polymarket-bridge"]["minimum_deposit"]
+        self.assertEqual(minimum["base_units"], "2500000")
+        self.assertEqual(minimum["amount"], "2.5")
+        self.assertEqual(minimum["decimals"], 6)
+
         self.assertNotIn("minimum_deposit", routes["polygon-pusd-direct"])
         self.assertNotIn("minimum_deposit", routes["polygon-usdce-onramp"])
+        self.assertNotIn("minimum_deposit", routes["polygon-usdc-bridge"])
+        self.assertNotIn("minimum_deposit", routes["polygon-usdt-bridge"])
 
     def test_spike_bridge_minimum_does_not_drift_from_the_adapter(self):
         # scripts/g0_spike.py keeps a standalone copy so it can run without the
@@ -300,7 +295,7 @@ class SubmissionPackageTests(unittest.TestCase):
         for field in ("salt", "maker", "signer", "timestamp", "metadata", "builder", "signature"):
             self.assertIn(field, eip["fields_supplied_by_caller"])
             self.assertNotIn(field, eip["fields_fixed_by_oracle"])
-        self.assertEqual(eip["fields_fixed_by_oracle"]["signatureType"], "3")
+        self.assertEqual(eip["fields_fixed_by_oracle"]["signatureType"], "0")
 
     def test_service_declares_it_holds_no_credential(self):
         pkg = self.package()

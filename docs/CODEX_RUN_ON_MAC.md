@@ -1,4 +1,9 @@
-# Codex: run the deposit-wallet sweep test on the Mac
+# Codex: run the deposit-wallet sweep test on the Mac (historical)
+
+> Do not run this procedure. It documents the superseded POLY_1271,
+> Agentic Wallet, deposit-wallet, and MaxUint256 experiment. Current execution
+> work follows `RESUME_HANDOFF_2026-07-24.md` and the buyer-owned EOA/type-0
+> path.
 
 This is the cheap de-risk for the just-in-time-balance safety model. It proves the
 POLY_1271 deposit wallet can push unspent pUSD back to its owner via a relayer
